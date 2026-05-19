@@ -40,7 +40,8 @@ _DEFAULTS = {
     "filter_mode": "none",        # "none" | "custom"
     "custom_filter_config": None,
     "match_info": [],             # list of match records from last filter
-    "keyword_summary": {},        # {category: [{keyword, matched, hits}]}
+    "keyword_summary": {},        # {category: [{keyword, weight, matched, hits}]}
+    "protocol_score": None,       # weighted scoring result from last filter
     "api_base_url": "http://localhost:8000",
     "last_error": None,
 }
@@ -78,12 +79,114 @@ div[data-testid="metric-container"] { background: #161b22; border: 1px solid #30
 .kw-path   { color: #e6edf3; }
 .kw-field  { color: #8b949e; font-size: 11px; margin-left: 8px; }
 .kw-actual { color: #d29922; font-size: 11px; margin-top: 2px; }
+
+/* ── Protocol verdict card ── */
+.verdict-card {
+  border-radius: 10px; padding: 16px 20px; margin: 12px 0 4px 0;
+  display: flex; align-items: center; gap: 20px;
+}
+.verdict-confirmed { background: rgba(63,185,80,.12);  border: 1px solid rgba(63,185,80,.4); }
+.verdict-likely     { background: rgba(88,166,255,.10); border: 1px solid rgba(88,166,255,.35); }
+.verdict-possible   { background: rgba(210,153,34,.10); border: 1px solid rgba(210,153,34,.35); }
+.verdict-none       { background: rgba(139,148,158,.08);border: 1px solid rgba(139,148,158,.3); }
+.verdict-label { font-size: 22px; font-weight: 800; letter-spacing: .01em; }
+.verdict-confirmed .verdict-label { color: #3fb950; }
+.verdict-likely     .verdict-label { color: #58a6ff; }
+.verdict-possible   .verdict-label { color: #d29922; }
+.verdict-none       .verdict-label { color: #8b949e; }
+.verdict-score-bar-wrap {
+  flex: 1; background: #21262d; border-radius: 6px; height: 10px; overflow: hidden;
+}
+.verdict-score-bar { height: 10px; border-radius: 6px; transition: width .4s; }
+.verdict-confirmed .verdict-score-bar { background: #3fb950; }
+.verdict-likely     .verdict-score-bar { background: #58a6ff; }
+.verdict-possible   .verdict-score-bar { background: #d29922; }
+.verdict-none       .verdict-score-bar { background: #8b949e; }
+.kw-weight-badge {
+  display:inline-block; background:#21262d; border:1px solid #30363d;
+  border-radius:4px; padding:0 5px; font-size:10px; color:#8b949e;
+  font-family:monospace; margin-left:6px; vertical-align:middle;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
 def get_client() -> APIClient:
     return APIClient(st.session_state.api_base_url)
+
+
+# ── Protocol verdict renderer ─────────────────────────────────────────────────
+
+def _render_protocol_verdict(ps: dict):
+    """
+    Render a verdict card at the top of the results section.
+
+    Layout:
+      ┌─────────────────────────────────────────────────────────────────────┐
+      │  🔐 SAML Filter          Confirmed ████████████░░░  87 / 100        │
+      │  Matched 12 keywords · top signals: SAMLResponse(10) saml:Assertion │
+      └─────────────────────────────────────────────────────────────────────┘
+    """
+    verdict   = ps.get("verdict", "Not detected")
+    score     = ps.get("score", 0)
+    protocol  = ps.get("protocol", "Protocol")
+    earned           = ps.get("earned", 0)
+    saturation_point  = ps.get("saturation_point", 0)
+    total_weight      = ps.get("total_weight", 0)
+    evidence  = ps.get("evidence", [])
+
+    verdict_class = {
+        "Confirmed":    "verdict-confirmed",
+        "Likely":       "verdict-likely",
+        "Possible":     "verdict-possible",
+        "Not detected": "verdict-none",
+    }.get(verdict, "verdict-none")
+
+    verdict_icon = {
+        "Confirmed":    "✅",
+        "Likely":       "🔵",
+        "Possible":     "🟡",
+        "Not detected": "❌",
+    }.get(verdict, "❔")
+
+    # Top-3 evidence snippets
+    top_evidence = evidence[:3]
+    evidence_chips = " &nbsp;".join(
+        f'<code style="background:#1c2128;border:1px solid #30363d;border-radius:4px;'
+        f'padding:1px 6px;font-size:11px;color:#e6edf3">'
+        f'{e["keyword"]} <span style="color:#d29922">w{e["weight"]}</span></code>'
+        for e in top_evidence
+    )
+    matched_count = len(evidence)
+
+    # Pre-compute optional line to avoid backslash inside f-string (Python < 3.12)
+    if top_evidence:
+        top_signals_html = '<div style="margin-top:6px">Top signals: ' + evidence_chips + '</div>'
+    else:
+        top_signals_html = ''
+
+    st.markdown(
+        f'<div class="verdict-card {verdict_class}">'
+        f'  <div style="min-width:180px">'
+        f'    <div style="font-size:11px;color:#8b949e;margin-bottom:2px;text-transform:uppercase;letter-spacing:.06em">Protocol Detection</div>'
+        f'    <div style="font-size:14px;font-weight:700;color:#e6edf3">{protocol}</div>'
+        f'  </div>'
+        f'  <div style="flex:1">'
+        f'    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+        f'      <span class="verdict-label">{verdict_icon} {verdict}</span>'
+        f'      <span style="color:#8b949e;font-size:13px">{score}/100</span>'
+        f'    </div>'
+        f'    <div class="verdict-score-bar-wrap">'
+        f'      <div class="verdict-score-bar" style="width:{score}%"></div>'
+        f'    </div>'
+        f'    <div style="font-size:11px;color:#8b949e;margin-top:6px">'
+        f'      Confidence: {earned} pts earned · threshold {saturation_point} pts (top-5 signals) · {total_weight} pts total'
+        f'    </div>'
+        f'    {top_signals_html}'
+        f'  </div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ── Keyword summary renderer ──────────────────────────────────────────────────
@@ -140,8 +243,10 @@ def _render_keyword_summary(keyword_summary: dict):
             rows_html = ""
             for entry in entries:
                 kw      = entry["keyword"]
+                weight  = entry.get("weight", 5)
                 matched = entry["matched"]
                 hits    = entry.get("hits", [])
+                w_badge = f'<span class="kw-weight-badge">w{weight}</span>'
 
                 if matched and hits:
                     unique_nodes = len({h["node_id"] for h in hits})
@@ -154,6 +259,7 @@ def _render_keyword_summary(keyword_summary: dict):
                         f'<code style="background:#1c2128;border:1px solid #30363d;'
                         f'border-radius:4px;padding:1px 7px;font-size:12px;color:#e6edf3">'
                         f'{kw}</code>'
+                        f'{w_badge}'
                         f'<span style="color:#8b949e;font-size:11px;margin-left:4px">'
                         f'→ {unique_nodes} node(s), {len(hits)} hit(s)</span>'
                         f'</div>'
@@ -191,6 +297,7 @@ def _render_keyword_summary(keyword_summary: dict):
                         f'<code style="background:#161b22;border:1px solid #21262d;'
                         f'border-radius:4px;padding:1px 7px;font-size:12px;color:#8b949e">'
                         f'{kw}</code>'
+                        f'{w_badge}'
                         f'</div>'
                     )
 
@@ -320,6 +427,7 @@ with fc1:
         st.session_state.custom_filter_config = None
         st.session_state.match_info = []
         st.session_state.keyword_summary = {}
+        st.session_state.protocol_score = None
         st.rerun()
 
 with fc2:
@@ -357,6 +465,7 @@ if mode == "custom" and st.session_state.custom_filter_config:
         st.session_state.custom_filter_config = None
         st.session_state.match_info = []
         st.session_state.keyword_summary = {}
+        st.session_state.protocol_score = None
         st.rerun()
 
 # ── Download filtered JSON ────────────────────────────────────────────────────
@@ -382,6 +491,10 @@ st.components.v1.html(tree_html, height=800, scrolling=False)
 # ── Keyword summary panel ─────────────────────────────────────────────────────
 
 keyword_summary: dict = st.session_state.get("keyword_summary", {})
+protocol_score:  dict = st.session_state.get("protocol_score") or {}
+
+if mode == "custom" and protocol_score:
+    _render_protocol_verdict(protocol_score)
 
 if mode == "custom" and keyword_summary:
     _render_keyword_summary(keyword_summary)

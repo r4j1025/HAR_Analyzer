@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
@@ -107,15 +107,16 @@ class CustomFilterConfig(BaseModel):
     name: str = "Custom Filter"
     description: Optional[str] = None
 
-    # Per-field keyword lists (used when match_mode == "any_field")
-    url_keywords: List[str] = Field(default_factory=list)
-    req_header_keywords: List[str] = Field(default_factory=list)
-    res_header_keywords: List[str] = Field(default_factory=list)
-    req_body_keywords: List[str] = Field(default_factory=list)
-    res_body_keywords: List[str] = Field(default_factory=list)
+    # Per-field keyword lists (used when match_mode == "any_field").
+    # Each entry is either a plain string or {"keyword": str, "weight": int}.
+    url_keywords: List[Any] = Field(default_factory=list)
+    req_header_keywords: List[Any] = Field(default_factory=list)
+    res_header_keywords: List[Any] = Field(default_factory=list)
+    req_body_keywords: List[Any] = Field(default_factory=list)
+    res_body_keywords: List[Any] = Field(default_factory=list)
 
     # AND-list (used when match_mode == "keyword_list")
-    keyword_list: List[str] = Field(default_factory=list)
+    keyword_list: List[Any] = Field(default_factory=list)
 
     match_mode: Literal["any_field", "keyword_list"] = "any_field"
 

@@ -27,6 +27,20 @@ from typing import List, Optional
 from models import CustomFilterConfig, RequestNode
 
 
+# ── Keyword entry helpers ──────────────────────────────────────────────────────
+# Keywords are either plain strings ("token") or weighted dicts
+# ({"keyword": "token", "weight": 9}).  These two helpers normalise access.
+
+def _kw_str(entry) -> str:
+    """Return the keyword string regardless of entry format."""
+    return entry["keyword"] if isinstance(entry, dict) else entry
+
+
+def _kw_weight(entry) -> int:
+    """Return the weight (1-10); default 5 for plain-string entries."""
+    return int(entry.get("weight", 5)) if isinstance(entry, dict) else 5
+
+
 # ── Text extraction helpers ────────────────────────────────────────────────────
 
 def _fields(node: RequestNode) -> dict:
@@ -108,8 +122,8 @@ def _get_matches(node: RequestNode, cfg: CustomFilterConfig) -> list:
     ]
     seen = set()
     for keywords, field in checks:
-        for kw in keywords:
-            kw = kw.strip()
+        for entry in keywords:
+            kw = _kw_str(entry).strip()
             if not kw:
                 continue
             key = (kw.lower(), field)
@@ -174,13 +188,13 @@ def _filter_keyword_list(
         match_info = []
 
     current_text = ancestor_text + "\n" + _fields(node)["all"]
-    kws = [kw.strip().lower() for kw in keywords if kw.strip()]
+    kws = [_kw_str(kw).lower() for kw in keywords if _kw_str(kw).strip()]
 
     if all(kw in current_text.lower() for kw in kws):
         hits = []
         f = _fields(node)
-        for kw in keywords:
-            kw = kw.strip()
+        for entry in keywords:
+            kw = _kw_str(entry).strip()
             if not kw:
                 continue
             for field, label in _FIELD_LABELS.items():
@@ -258,12 +272,13 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
             continue
 
         entries = []
-        for kw in keywords:
-            kw = kw.strip()
+        for raw_entry in keywords:
+            kw = _kw_str(raw_entry).strip()
             if not kw:
                 continue
 
-            all_hits = kw_to_hits.get(kw.lower(), [])
+            weight    = _kw_weight(raw_entry)
+            all_hits  = kw_to_hits.get(kw.lower(), [])
 
             # For field-specific categories, only count hits from the right field.
             # For keyword_list (field_filter=None), accept hits from any field.
@@ -274,6 +289,7 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
 
             entries.append({
                 "keyword": kw,
+                "weight":  weight,
                 "matched": len(relevant_hits) > 0,
                 "hits":    relevant_hits,
             })
@@ -284,7 +300,84 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
     return summary
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ── Protocol score ─────────────────────────────────────────────────────────────
+
+# Number of top-weighted keywords whose combined weight defines "100% confident".
+# A HAR only captures what the browser did — most keywords will simply be absent
+# because that endpoint was never hit.  Dividing by the weight of ALL keywords
+# (including ones that could never appear together) gives an unfairly low score.
+# Instead we ask: "did we find the equivalent of the N strongest signals?"
+_SATURATION_TOP_N = 5
+
+
+def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> dict:
+    """
+    Compute a weighted confidence score using a saturation-threshold denominator.
+
+    Rationale
+    ---------
+    A HAR file only records requests that actually happened, so most keywords in
+    a large filter will simply be absent - not because the protocol is not in use,
+    but because those endpoints were never hit during the recording.  Dividing by
+    the total weight of all keywords punishes the score for absence of evidence,
+    producing "Not detected" even when definitive signals (SAMLRequest,
+    saml:Assertion) are present.
+
+    Fix: denominator = sum of the top-N keyword weights (default N=5).
+    Interpretation: "if you found signals equivalent to the 5 strongest possible
+    keywords for this protocol, we are fully confident."  Scores above 100 are
+    capped, so matching more than 5 strong keywords never penalises the result.
+
+    Verdict thresholds (on the capped 0-100 scale):
+      >= 70 -> Confirmed  |  >= 40 -> Likely  |  >= 15 -> Possible  |  < 15 -> Not detected
+    """
+    all_weights = []
+    earned      = 0
+    evidence    = []
+
+    for cat_name, entries in keyword_summary.items():
+        for entry in entries:
+            w = entry.get("weight", 5)
+            all_weights.append(w)
+            if entry["matched"]:
+                earned += w
+                evidence.append({
+                    "keyword":  entry["keyword"],
+                    "category": cat_name,
+                    "weight":   w,
+                    "hits":     len(entry["hits"]),
+                })
+
+    # Saturation point = sum of the N highest weights in the whole config.
+    # This is the weight you would earn by finding the N most important signals.
+    top_n_weights    = sorted(all_weights, reverse=True)[:_SATURATION_TOP_N]
+    saturation_point = sum(top_n_weights) or 1      # guard against empty config
+    total_weight     = sum(all_weights)              # kept for display only
+
+    # Cap at 100: finding more than N strong signals does not lower confidence.
+    score = min(100, round(earned / saturation_point * 100))
+
+    verdict = (
+        "Confirmed"    if score >= 70 else
+        "Likely"       if score >= 40 else
+        "Possible"     if score >= 15 else
+        "Not detected"
+    )
+
+    evidence.sort(key=lambda x: x["weight"], reverse=True)
+
+    return {
+        "protocol":         cfg.name,
+        "score":            score,
+        "earned":           earned,
+        "saturation_point": saturation_point,
+        "total_weight":     total_weight,
+        "verdict":          verdict,
+        "evidence":         evidence,
+    }
+
+
+
 
 def _count(node: Optional[RequestNode]) -> int:
     if node is None:
@@ -350,6 +443,7 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
                     })
 
     keyword_summary = _build_keyword_summary(cfg, match_info)
+    protocol_score  = _compute_protocol_score(cfg, keyword_summary)
 
     return {
         "root_url":           payload.get("root_url", ""),
@@ -361,4 +455,5 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
         "filter_config":      cfg.model_dump(),
         "match_info":         match_info,
         "keyword_summary":    keyword_summary,
+        "protocol_score":     protocol_score,
     }

@@ -53,10 +53,28 @@ def _client():
     return APIClient(st.session_state.get("api_base_url", "http://localhost:8000"))
 
 
+# ── Keyword entry helpers (mirror of custom_filter.py) ───────────────────────
+
+def _kw_str(entry) -> str:
+    return entry["keyword"] if isinstance(entry, dict) else entry
+
+def _kw_weight(entry) -> int:
+    return int(entry.get("weight", 5)) if isinstance(entry, dict) else 5
+
+def _kw_label(entry) -> str:
+    """Short display label used on remove buttons and chips."""
+    return _kw_str(entry)[:16]
+
+
 # ── Keyword list widget ───────────────────────────────────────────────────────
 
 def kw_widget(fkey: str, label: str, ph: str = "", help_txt: str = ""):
-    """Renders an add-input + removable chip list for st.session_state.cf[fkey]."""
+    """
+    Renders an add-input (keyword + weight) + removable chip list.
+    Each item in session_state.cf[fkey] is stored as
+    {"keyword": str, "weight": int} so it round-trips cleanly with the
+    weighted filter JSON format.
+    """
     items: list = st.session_state.cf.setdefault(fkey, [])
 
     st.markdown(f"**{label}**")
@@ -64,30 +82,52 @@ def kw_widget(fkey: str, label: str, ph: str = "", help_txt: str = ""):
         st.caption(help_txt)
 
     if items:
-        chips = "".join(f'<span class="kw-chip">🔑 {kw}</span>' for kw in items)
-        st.markdown(chips, unsafe_allow_html=True)
+        # Build chip HTML — show keyword text + weight badge
+        chips_html = ""
+        for entry in items:
+            kw = _kw_str(entry)
+            w  = _kw_weight(entry)
+            chips_html += (
+                f'<span class="kw-chip">🔑 {kw} '
+                f'<span style="background:#21262d;border:1px solid #30363d;'
+                f'border-radius:3px;padding:0 4px;font-size:10px;color:#8b949e;'
+                f'margin-left:3px">w{w}</span></span>'
+            )
+        st.markdown(chips_html, unsafe_allow_html=True)
+
+        # Remove buttons — one row of up to 5 columns
         rm_cols = st.columns(min(len(items), 5))
-        for i, kw in enumerate(items):
+        for i, entry in enumerate(items):
             with rm_cols[i % 5]:
-                if st.button(f"✕ {kw[:18]}", key=f"rm_{fkey}_{i}",
+                if st.button(f"✕ {_kw_label(entry)}", key=f"rm_{fkey}_{i}",
                              use_container_width=True):
                     st.session_state.cf[fkey].pop(i)
                     st.rerun()
     else:
         st.caption("_No keywords yet_")
 
-    col_in, col_btn = st.columns([5, 1])
+    # Add row: keyword text input + weight selector + add button
+    col_in, col_w, col_btn = st.columns([4, 1, 1])
     with col_in:
         new_val = st.text_input("_", placeholder=ph,
                                 label_visibility="collapsed", key=f"inp_{fkey}")
+    with col_w:
+        new_weight = st.number_input(
+            "W", min_value=1, max_value=10, value=5,
+            label_visibility="visible", key=f"wgt_{fkey}",
+            help="Keyword weight 1 (weak) – 10 (strong)"
+        )
     with col_btn:
+        st.markdown("<div style='margin-top:28px'>", unsafe_allow_html=True)
         if st.button("＋", key=f"addbtn_{fkey}", use_container_width=True):
             t = new_val.strip()
-            if t and t not in st.session_state.cf[fkey]:
-                st.session_state.cf[fkey].append(t)
+            existing_kws = [_kw_str(e) for e in st.session_state.cf[fkey]]
+            if t and t not in existing_kws:
+                st.session_state.cf[fkey].append({"keyword": t, "weight": int(new_weight)})
                 st.rerun()
             elif t:
                 st.toast("Already in list", icon="⚠️")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +276,7 @@ else:  # keyword_list (AND) mode
 
     kl = st.session_state.cf.get("keyword_list", [])
     if kl:
-        st.markdown("**AND expression:** " + " **∧** ".join(f"`{k}`" for k in kl))
+        st.markdown("**AND expression:** " + " **∧** ".join(f"`{_kw_str(k)}`" for k in kl))
     else:
         st.caption("No keywords — filter will return the full tree.")
 
@@ -295,6 +335,7 @@ with a3:
                     st.session_state.custom_filter_config = cfg
                     st.session_state.match_info        = res.get("match_info", [])
                     st.session_state.keyword_summary   = res.get("keyword_summary", {})
+                    st.session_state.protocol_score    = res.get("protocol_score", None)
                     st.session_state.last_error        = None
                     st.success(f"✅ {res.get('total_custom_nodes', 0)} matching node(s).")
                     st.switch_page("Home.py")
