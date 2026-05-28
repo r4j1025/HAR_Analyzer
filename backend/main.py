@@ -69,8 +69,6 @@ async def analyze(
     root_url: str = Form(..., description="Root URL — e.g. https://app.example.com"),
     har_files: List[UploadFile] = File(..., description="One or more .har files"),
 ):
-    if not root_url.startswith(("http://", "https://")):
-        raise HTTPException(400, "root_url must start with http:// or https://")
 
     har_contents = []
     for f in har_files:

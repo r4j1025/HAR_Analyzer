@@ -24,6 +24,7 @@ from models import (
     ResponseDetail,
     TimingInfo,
 )
+from decoder import expand_body, expand_headers
 
 # ---------------------------------------------------------------------------
 # Noise filter configuration
@@ -278,8 +279,10 @@ def _entry_to_node(entry: dict, root_domain: str) -> Optional[RequestNode]:
     req_cookies  = _parse_cookies(req.get("cookies", []))
     resp_cookies = _parse_cookies(resp.get("cookies", []))
 
-    req_body, req_mime, req_body_parsed    = _parse_request_body(req)
-    resp_body, resp_mime, resp_body_parsed = _parse_response_body(resp)
+    req_body, req_mime, req_body_parsed, req_body_decoded   = _parse_request_body(req)
+    resp_body, resp_mime, resp_body_parsed, resp_body_decoded = _parse_response_body(resp)
+    req_headers_decoded  = expand_headers(req_headers)
+    resp_headers_decoded = expand_headers(resp_headers)
 
     redirect_url = None
     if status in (301, 302, 303, 307, 308):
@@ -308,6 +311,8 @@ def _entry_to_node(entry: dict, root_domain: str) -> Optional[RequestNode]:
             body=req_body,
             body_mime_type=req_mime,
             body_parsed=req_body_parsed,
+            body_decoded=req_body_decoded,
+            headers_decoded=req_headers_decoded,
         ),
         response=ResponseDetail(
             status=status,
@@ -318,6 +323,8 @@ def _entry_to_node(entry: dict, root_domain: str) -> Optional[RequestNode]:
             body_mime_type=resp_mime,
             body_parsed=resp_body_parsed,
             redirect_url=redirect_url,
+            body_decoded=resp_body_decoded,
+            headers_decoded=resp_headers_decoded,
         ),
         timing=_parse_timing(entry),
         source_har=entry.get("_source_har"),
@@ -349,7 +356,7 @@ def _classify_node_type(req: dict, resp: dict, parsed) -> str:
 def _parse_request_body(req: dict):
     post = req.get("postData", {})
     if not post:
-        return None, None, None
+        return None, None, None, None
     mime = post.get("mimeType", "")
     text = post.get("text", "")
     parsed = None
@@ -362,13 +369,13 @@ def _parse_request_body(req: dict):
         parsed = {k: v[0] if len(v) == 1 else v for k, v in parse_qs(text).items()}
     elif post.get("params"):
         parsed = {p["name"]: p["value"] for p in post["params"]}
-    return (text[:8192] if text else None), mime, parsed
+    return (text if text else None), mime, parsed, expand_body(text, parsed)
 
 
 def _parse_response_body(resp: dict):
     content = resp.get("content", {})
     if not content:
-        return None, None, None
+        return None, None, None, None
     mime = content.get("mimeType", "")
     text = content.get("text", "")
     parsed = None
@@ -377,7 +384,7 @@ def _parse_response_body(resp: dict):
             parsed = json.loads(text)
         except Exception:
             pass
-    return (text[:16384] if text else None), mime, parsed
+    return (text if text else None), mime, parsed, expand_body(text, parsed)
 
 
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from __future__ import annotations
 import copy
 import json
 
-MAX_BODY_CHARS = 4_000
+MAX_BODY_CHARS = 200_000
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -274,6 +274,54 @@ mark.kw-hl{
 .mkw-kw{color:var(--auth);font-weight:700}
 .mkw-field{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em}
 .mkw-path{color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:160px;white-space:nowrap}
+
+/* ── Encoding indicator badges ── */
+.enc-badge{display:inline-flex;align-items:center;font-family:var(--mono);font-size:9px;
+  font-weight:700;padding:0 5px;border-radius:8px;margin:0 2px;vertical-align:middle;
+  cursor:default;letter-spacing:.03em;user-select:none}
+.enc-url {background:rgba(63,185,80,.12);color:#3fb950;border:1px solid rgba(63,185,80,.3)}
+.enc-b64 {background:rgba(88,166,255,.12);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}
+.enc-jwt {background:rgba(240,136,62,.15);color:#f0883e;border:1px solid rgba(240,136,62,.35)}
+.enc-hex {background:rgba(188,140,255,.12);color:#bc8cff;border:1px solid rgba(188,140,255,.3)}
+.enc-html{background:rgba(210,153,34,.12);color:#d29922;border:1px solid rgba(210,153,34,.3)}
+
+/* ── Decode popup ── */
+.decode-popup{position:fixed;z-index:9999;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:10px 12px;box-shadow:0 8px 28px rgba(0,0,0,.6);
+  min-width:240px;max-width:300px;display:none}
+.decode-popup.visible{display:block}
+.decode-popup-title{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.07em;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.decode-opts{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+.decode-btn{background:var(--surface2);border:1px solid var(--border);border-radius:4px;
+  color:var(--text);cursor:pointer;font-size:11px;padding:3px 9px;font-family:var(--mono);
+  transition:background .1s}
+.decode-btn:hover{background:var(--border)}
+.decode-btn.detected{border-color:var(--accent);color:var(--accent);font-weight:700}
+.decode-close{position:absolute;top:7px;right:9px;background:none;border:none;
+  color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 2px}
+.decode-close:hover{color:var(--text)}
+
+/* ── Decode result panel ── */
+.decode-result-panel{position:fixed;z-index:9998;background:var(--surface);
+  border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+  box-shadow:0 8px 28px rgba(0,0,0,.6);display:none;flex-direction:column;gap:7px}
+.decode-result-panel.visible{display:flex}
+.decode-result-header{display:flex;align-items:center;justify-content:space-between;
+  font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+.decode-result-body{background:var(--surface2);border:1px solid var(--border);border-radius:4px;
+  padding:8px;font-family:var(--mono);font-size:11px;white-space:pre-wrap;
+  word-break:break-all;overflow-y:auto;max-height:200px;color:var(--text);margin:0}
+.decode-result-actions{display:flex;gap:6px}
+.decode-ra-btn{background:var(--surface);border:1px solid var(--border);border-radius:4px;
+  color:var(--muted);cursor:pointer;font-size:11px;padding:3px 10px;
+  transition:background .1s,color .1s}
+.decode-ra-btn:hover{background:var(--border);color:var(--text)}
+.decode-ra-btn.ok{background:rgba(63,185,80,.15);border-color:var(--success);color:var(--success)}
+.enc-hint{font-size:10px;color:var(--muted);margin-bottom:5px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+#decBreadcrumb{display:flex}
+.body-kv-tbl td{border-top:1px solid var(--border);font-family:var(--mono);font-size:12px}
+.enc-badge[onclick]{transition:opacity .1s}.enc-badge[onclick]:hover{opacity:.7}
 </style>
 </head>
 <body>
@@ -531,11 +579,11 @@ function renderDetail(n, highlights){
       ${sec('Request Headers', hdrsTable(n.request?.headers||[], kws), true)}
       ${n.request?.cookies?.length ? sec('Request Cookies', cookieTable(n.request.cookies, kws)) : ''}
       ${Object.keys(n.request?.query_params||{}).length ? sec('Query Params', kvTableH(n.request.query_params, kws)) : ''}
-      ${n.request?.body ? sec('Request Body', bodyBlock(n.request.body, n.request.body_parsed, kws)) : ''}
+      ${n.request?.body ? sec('Request Body', bodyBlock(n.request.body, n.request.body_parsed, kws, n.request.body_mime_type||"")) : ''}
       ${sec('Response Headers', hdrsTable(n.response?.headers||[], kws), true)}
       ${n.response?.cookies?.length ? sec('Response Cookies', cookieTable(n.response.cookies, kws)) : ''}
       ${n.response?.redirect_url ? sec('Redirect →', `<p style="font-family:var(--mono);font-size:12px;color:var(--warn);word-break:break-all">${hesc(n.response.redirect_url, kws)}</p>`) : ''}
-      ${n.response?.body ? sec('Response Body', bodyBlock(n.response.body, n.response.body_parsed, kws)) : ''}
+      ${n.response?.body ? sec('Response Body', bodyBlock(n.response.body, n.response.body_parsed, kws, n.response.body_mime_type||"")) : ''}
       ${n.timing?.total_ms ? sec('Timing', timingBlock(n.timing)) : ''}
       ${n.children?.length ? sec('Children ('+n.children.length+')', childrenTable(n.children)) : ''}
     </div>`;
@@ -557,17 +605,171 @@ function sec(title, content, open=false){
 }
 function hdrsTable(hs, kws=new Set()){
   if(!hs?.length) return '<p class="no-data">—</p>';
-  return `<table class="kv">${hs.map(h=>`<tr><td>${hesc(h.name,kws)}</td><td>${hesc(h.value,kws)}</td></tr>`).join('')}</table>`;
+  return `<table class="kv">${hs.map(h=>{
+    const vEnc = (h.value||'').length>16 ? detectEncodings(h.value||'') : [];
+    const badges = vEnc.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return`<span class="enc-badge ${e.cls}">${e.badge}</span>`;}).join('');
+    return `<tr><td>${hesc(h.name,kws)}</td><td>${hesc(h.value,kws)}${badges}</td></tr>`;
+  }).join('')}</table>`;
 }
 function cookieTable(cs, kws=new Set()){
-  return `<table class="kv">${cs.map(c=>`<tr><td>${hesc(c.name,kws)}</td><td>${hesc(c.value,kws)}${c.http_only?' <span style="color:var(--muted);font-size:9px">HttpOnly</span>':''}${c.secure?' <span style="color:var(--muted);font-size:9px">Secure</span>':''}</td></tr>`).join('')}</table>`;
+  return `<table class="kv">${cs.map(c=>{
+    const vEnc=(c.value||'').length>16?detectEncodings(c.value||''):[];
+    const badges=vEnc.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return`<span class="enc-badge ${e.cls}">${e.badge}</span>`;}).join('');
+    return `<tr><td>${hesc(c.name,kws)}</td><td>${hesc(c.value,kws)}${badges}${c.http_only?' <span style="color:var(--muted);font-size:9px">HttpOnly</span>':''}${c.secure?' <span style="color:var(--muted);font-size:9px">Secure</span>':''}</td></tr>`;
+  }).join('')}</table>`;
 }
 function kvTableH(obj, kws=new Set()){
-  return `<table class="kv">${Object.entries(obj).map(([k,v])=>`<tr><td>${hesc(k,kws)}</td><td>${hesc(Array.isArray(v)?v.join(', '):String(v),kws)}</td></tr>`).join('')}</table>`;
+  return `<table class="kv">${Object.entries(obj).map(([k,v])=>{
+    const sv=Array.isArray(v)?v.join(', '):String(v);
+    const vEnc = sv.length>16 ? detectEncodings(sv) : [];
+    const badges = vEnc.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return`<span class="enc-badge ${e.cls}">${e.badge}</span>`;}).join('');
+    return `<tr><td>${hesc(k,kws)}</td><td>${hesc(sv,kws)}${badges}</td></tr>`;
+  }).join('')}</table>`;
 }
-function bodyBlock(raw, parsed, kws=new Set()){
-  const txt = parsed ? JSON.stringify(parsed,null,2) : (raw||'');
-  return `<pre class="bpre">${hesc(txt.substring(0,8192), kws)}</pre>`;
+/* ── Body value decode helper ─────────────────────────────────────────────── */
+function _attrEsc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function _decodeBodyValue(el, method){
+  /* Called from badge onclick — reads raw value from data-val attribute. */
+  _ensureDecodeUI();
+  _selText = el.getAttribute('data-val');
+  _decodeHistory = [];
+  applyDecode(method, false);
+}
+
+function _bodyValueRow(k, v, kws){
+  /* For a single key:value pair, return an HTML row that shows the value and
+     any detected encodings as inline quick-decode links. */
+  const vStr = typeof v === 'string' ? v : JSON.stringify(v);
+  const enc  = detectEncodings(vStr);
+  let badges = '';
+  if(enc.length){
+    badges = enc.map(id=>{
+      const e=ENCODINGS.find(e=>e.id===id);
+      if(!e)return'';
+      // Store raw value in data-val attribute (HTML-escaped) to avoid
+      // JSON.stringify quote-wrapping that breaks the decoder input.
+      return`<span class="enc-badge ${e.cls}" style="cursor:pointer" `+
+        `title="Click to decode ${e.label}" `+
+        `data-val="${_attrEsc(vStr)}" `+
+        `onclick="event.stopPropagation();_decodeBodyValue(this,'${id}')">`+
+        `${e.badge} ↗</span>`;
+    }).join('');
+  }
+  const kHtml = `<span style="color:#8b949e">${hesc(k,kws)}</span>`;
+  // Long values: show first 120 chars with expand toggle
+  const VMAX = 120;
+  let vHtml;
+  if(vStr.length > VMAX){
+    const uid2='bv'+Math.random().toString(36).slice(2);
+    vHtml=`<span id="${uid2}-short">${hesc(vStr.substring(0,VMAX),kws)}<span style="color:var(--muted)">…</span>`+
+      `<a href="#" style="color:var(--accent);font-size:10px;margin-left:4px" `+
+      `onclick="event.preventDefault();document.getElementById('${uid2}-short').style.display='none';`+
+      `document.getElementById('${uid2}-full').style.display='inline';return false;">show all</a></span>`+
+      `<span id="${uid2}-full" style="display:none">${hesc(vStr,kws)}</span>`;
+  } else {
+    vHtml = hesc(vStr,kws);
+  }
+  return `<tr><td style="color:#8b949e;white-space:nowrap;vertical-align:top;padding:3px 8px 3px 0;min-width:120px">${kHtml}</td>`+
+    `<td style="word-break:break-all;padding:3px 0;vertical-align:top">${vHtml}${badges?`<span style="margin-left:6px">${badges}</span>`:''}</td></tr>`;
+}
+
+function _flattenObj(obj, prefix, rows, kws, depth){
+  if(depth>6)return;
+  if(typeof obj==='object'&&obj!==null&&!Array.isArray(obj)){
+    for(const[k,v] of Object.entries(obj)){
+      const fk=prefix?`${prefix}.${k}`:k;
+      if(typeof v==='object'&&v!==null){
+        _flattenObj(v,fk,rows,kws,depth+1);
+      } else {
+        rows.push(_bodyValueRow(fk,v,kws));
+      }
+    }
+  } else if(Array.isArray(obj)){
+    obj.forEach((item,i)=>_flattenObj(item,`${prefix}[${i}]`,rows,kws,depth+1));
+  } else {
+    rows.push(_bodyValueRow(prefix,obj,kws));
+  }
+}
+
+function bodyBlock(raw, parsed, kws=new Set(), mime=""){
+  const rawStr = raw||'';
+  const PREVIEW = 8192;
+
+  // ── Try to render form body first if mime says so ───────────────────────────
+  const isForm = mime.includes('x-www-form-urlencoded') ||
+    (!mime.includes('json') && rawStr.includes('=') && rawStr.includes('&') &&
+     !rawStr.trimStart().startsWith('{') && !rawStr.trimStart().startsWith('<'));
+
+  // ── Try to render JSON as a smart key→value table ──────────────────────────
+  let jsonObj = isForm ? null : parsed;
+  if(!jsonObj && !isForm && rawStr.trimStart().startsWith('{')){
+    try{ jsonObj=JSON.parse(rawStr); }catch{}
+  }
+  if(jsonObj && typeof jsonObj==='object'){
+    const rows=[];
+    _flattenObj(jsonObj,'',rows,kws,0);
+    if(rows.length){
+      // Also provide a "raw JSON" toggle
+      const uid3='bj'+Math.random().toString(36).slice(2);
+      const rawTxt = JSON.stringify(jsonObj,null,2);
+      return `<div style="margin-bottom:4px;font-size:10px;color:var(--muted)">`+
+        `Body — <a href="#" style="color:var(--accent)" onclick="event.preventDefault();`+
+        `var t=document.getElementById('${uid3}-tbl');var p=document.getElementById('${uid3}-raw');`+
+        `t.style.display=t.style.display==='none'?'':'none';p.style.display=p.style.display==='none'?'':'none';`+
+        `return false;">toggle raw</a></div>`+
+        `<table id="${uid3}-tbl" style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px">`+
+        rows.join('')+`</table>`+
+        `<pre id="${uid3}-raw" style="display:none" class="bpre">${hesc(rawTxt,kws)}</pre>`;
+    }
+  }
+
+  // ── Try to render URL-encoded form body as key→value table ─────────────────
+  if(!jsonObj && rawStr.includes('=') && !rawStr.trimStart().startsWith('<')){
+    try{
+      const pairs=[...new URLSearchParams(rawStr)];
+      if(pairs.length>0){
+        const rows=[];
+        for(const[k,v] of pairs) rows.push(_bodyValueRow(k,v,kws));
+        const uid4='bf'+Math.random().toString(36).slice(2);
+        const rawTxt=rawStr;
+        return `<div style="margin-bottom:4px;font-size:10px;color:var(--muted)">`+
+          `Form body (decoded) — <a href="#" style="color:var(--accent)" onclick="event.preventDefault();`+
+          `var t=document.getElementById('${uid4}-tbl');var p=document.getElementById('${uid4}-raw');`+
+          `t.style.display=t.style.display==='none'?'':'none';p.style.display=p.style.display==='none'?'':'none';`+
+          `return false;">toggle raw</a></div>`+
+          `<table id="${uid4}-tbl" style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px">`+
+          rows.join('')+`</table>`+
+          `<pre id="${uid4}-raw" style="display:none" class="bpre">${hesc(rawTxt,kws)}</pre>`;
+      }
+    }catch{}
+  }
+
+  // ── Fallback: plain pre with encode hint + show-more toggle ────────────────
+  const rawEnc = detectEncodings(rawStr);
+  let hint = '';
+  if(rawEnc.length){
+    const chips = rawEnc.map(id=>{
+      const e=ENCODINGS.find(e=>e.id===id);
+      return `<span class="enc-badge ${e.cls}">${e.badge}</span>`;
+    }).join('');
+    hint = `<div class="enc-hint">${chips}<span>detected — select text to decode</span></div>`;
+  }
+  const txt = parsed ? JSON.stringify(parsed,null,2) : rawStr;
+  if(txt.length <= PREVIEW){
+    return hint+`<pre class="bpre">${hesc(txt, kws)}</pre>`;
+  }
+  const uid = 'bd'+Math.random().toString(36).slice(2);
+  return hint+
+    `<pre class="bpre" id="${uid}-pre">${hesc(txt.substring(0,PREVIEW), kws)}`+
+    `<span id="${uid}-ellipsis" style="color:var(--muted)">…\n[${(txt.length/1024).toFixed(1)} KB total — `+
+    `<a href="#" style="color:var(--accent)" onclick="event.preventDefault();`+
+    `document.getElementById('${uid}-pre').innerHTML=document.getElementById('${uid}-full').innerHTML;`+
+    `document.getElementById('${uid}-ellipsis').remove();document.getElementById('${uid}-full').remove();return false;">`+
+    `show all</a>]</span></pre>`+
+    `<span id="${uid}-full" style="display:none">${hesc(txt,kws)}</span>`;
 }
 function timingBlock(t){
   return `<div style="font-family:var(--mono);font-size:12px;display:flex;gap:18px;flex-wrap:wrap">
@@ -699,6 +901,239 @@ function hesc(s, kws){
   }
   return out;
 }
+
+/* ── Encoding detection & decode system ─────────────────────────────────── */
+const ENCODINGS=[
+  {id:'params',label:'URL Params Extract',badge:'KEY=VAL',cls:'enc-url',
+   detect:t=>{const s=t.trim();return s.includes('=')&&s.includes('&')&&!/[\s<>{}]/.test(s)},
+   decode:t=>{
+     try{
+       const s=t.trim().replace(/^\?/,'');
+       const pairs=s.split('&').filter(p=>p.includes('='));
+       if(!pairs.length)return{ok:0,val:'No key=value pairs found'};
+       const rows=pairs.map(p=>{
+         const eq=p.indexOf('=');const k=p.slice(0,eq);const v=p.slice(eq+1);
+         let dec='';try{dec=decodeURIComponent(v.replace(/\+/g,' '));}catch{dec=v;}
+         const further=detectEncodings(dec);
+         const hint=further.length?' [\u2192 '+further.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return e?e.badge:id;}).join(',')+']':'';
+         return k+' =\n  raw:     '+v+'\n  decoded: '+dec+hint;
+       });
+       return{ok:1,val:rows.join('\n\n')};
+     }catch(e){return{ok:0,val:''+e};}
+   }},
+  {id:'url',  label:'URL Decode',         badge:'URL%',  cls:'enc-url',
+   detect:t=>/%[0-9A-Fa-f]{2}/.test(t),
+   decode:t=>{try{return{ok:1,val:decodeURIComponent(t.replace(/\+/g,' '))}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'durl', label:'Double URL Decode',  badge:'URL%%', cls:'enc-url',
+   detect:t=>/%25[0-9A-Fa-f]{2}/.test(t),
+   decode:t=>{try{const a=decodeURIComponent(t.replace(/\+/g,' '));return{ok:1,val:decodeURIComponent(a.replace(/\+/g,' '))}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'jwt',  label:'JWT Decode',         badge:'JWT',   cls:'enc-jwt',
+   detect:t=>{const p=t.trim().split('.');return p.length===3&&p.every(s=>/^[A-Za-z0-9_-]+$/.test(s)&&s.length>=10)&&p[0].length+p[1].length+p[2].length>=60;},
+   decode:t=>{try{const p=t.trim().split('.');const d=s=>{s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return JSON.parse(atob(s))};return{ok:1,val:JSON.stringify({header:d(p[0]),payload:d(p[1])},null,2)+'\n\n[signature omitted]'}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'b64',  label:'Base64 Decode',      badge:'B64',   cls:'enc-b64',
+   detect:t=>{const s=t.trim().replace(/\s/g,'');if(s.length<20||!/^[A-Za-z0-9+\/]+=*$/.test(s))return false;const hasTypicalB64=(s.includes('+')||s.includes('/')||s.includes('='));const padded=s.length%4===0||(s.length+1)%4===0||(s.length+2)%4===0;return padded&&(hasTypicalB64||s.length>=60);},
+   decode:t=>{try{const b=atob(t.trim().replace(/\s/g,''));try{const u=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(b,c=>c.charCodeAt(0)));try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}catch{return{ok:1,val:u}}}catch{return{ok:1,val:'[binary]\n'+[...b].map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ')}}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'b64u', label:'Base64URL Decode',   badge:'B64U',  cls:'enc-b64',
+   detect:t=>{const s=t.trim();if(s.length<20||!/^[A-Za-z0-9_-]+=*$/.test(s))return false;return(s.includes('-')||s.includes('_'))&&s.length>=40&&!s.includes('.')},
+   decode:t=>{try{let s=t.trim().replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const b=atob(s);try{const u=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(b,c=>c.charCodeAt(0)));try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}catch{return{ok:1,val:u}}}catch{return{ok:1,val:'[binary]\n'+[...b].map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ')}}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'html', label:'HTML Entity Decode', badge:'HTML&', cls:'enc-html',
+   detect:t=>/(&amp;|&lt;|&gt;|&quot;|&#\d+;|&[a-z]{2,6};)/.test(t),
+   decode:t=>{try{const e=document.createElement('div');e.innerHTML=t;return{ok:1,val:e.textContent}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'hex',  label:'Hex Decode',         badge:'0x',    cls:'enc-hex',
+   detect:t=>{const s=t.trim().replace(/\s/g,'').replace(/^0x/i,'');return s.length>=16&&s.length%2===0&&/^[0-9a-fA-F]+$/.test(s)},
+   decode:t=>{try{const s=t.trim().replace(/\s/g,'').replace(/^0x/i,'');const b=[];for(let i=0;i<s.length;i+=2)b.push(parseInt(s.substr(i,2),16));return{ok:1,val:new TextDecoder().decode(new Uint8Array(b))}}catch(e){return{ok:0,val:''+e}}}},
+  {id:'xml',  label:'XML Pretty Print',   badge:'XML',   cls:'enc-html',
+   detect:t=>{const s=t.trim();return s.startsWith('<')&&s.includes('>')&&(s.includes('</')||s.includes('/>'))},
+   decode:t=>{
+     try{
+       const parser=new DOMParser();
+       const doc=parser.parseFromString(t.trim(),'application/xml');
+       const err=doc.querySelector('parsererror');
+       if(err)return{ok:0,val:'XML parse error:\n'+err.textContent};
+       const xs=new XMLSerializer();
+       try{
+         const xsltDoc=parser.parseFromString('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:strip-space elements="*"/><xsl:output method="xml" indent="yes"/><xsl:template match="node()|@*"><xsl:copy><xsl:apply-templates select="node()|@*"/></xsl:copy></xsl:template></xsl:stylesheet>','application/xml');
+         const xp=new XSLTProcessor();xp.importStylesheet(xsltDoc);
+         const out=xp.transformToDocument(doc);
+         return{ok:1,val:xs.serializeToString(out).replace(/^<\?xml[^?]*\?>\s*/,'')};
+       }catch{return{ok:1,val:xs.serializeToString(doc)};}
+     }catch(e){return{ok:0,val:''+e};}
+   }},
+];
+
+function detectEncodings(t){
+  if(!t||t.trim().length<5)return[];
+  const s=t.trim();
+  return ENCODINGS.filter(e=>{try{return e.detect(s)}catch{return false}}).map(e=>e.id);
+}
+
+/* ── Decode popup ─────────────────────────────────────────────────────────── */
+let _selText='';
+
+function _ensureDecodeUI(){
+  if(document.getElementById('decodePopup'))return;
+  const pp=document.createElement('div');
+  pp.id='decodePopup';pp.className='decode-popup';
+  pp.innerHTML=
+    '<button class="decode-close" onclick="hideDecodePopup()">✕</button>'+
+    '<div class="decode-popup-title">🔍 Decode Selection</div>'+
+    '<div id="decDetected" style="margin-bottom:7px"></div>'+
+    '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">All options:</div>'+
+    '<div class="decode-opts" id="decOpts"></div>';
+  document.body.appendChild(pp);
+  const rp=document.createElement('div');
+  rp.id='decodeResult';rp.className='decode-result-panel';
+  rp.innerHTML=
+    '<div class="decode-result-header">'+
+    '<span id="decResTitle">Decoded result</span>'+
+    '<button class="decode-close" onclick="hideDecodeResult()">✕</button></div>'+
+    '<div id="decBreadcrumb" style="display:none;font-size:10px;color:var(--muted);padding:3px 0 5px;flex-wrap:wrap;gap:3px;align-items:center"></div>'+
+    '<pre class="decode-result-body" id="decResBody"></pre>'+
+    '<div id="decChain" style="display:none;padding:4px 0;border-top:1px solid var(--border);margin-top:4px">'+
+    '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Decode further \u2192</div>'+
+    '<div class="decode-opts" id="decChainOpts"></div></div>'+
+    '<div class="decode-result-actions">'+
+    '<button class="decode-ra-btn" id="cpDecBtn" onclick="cpDecoded()">&#x2398; Copy</button>'+
+    '<button class="decode-ra-btn" id="decRevertBtn" onclick="revertDecode()" style="display:none">\u21a9 Revert</button>'+
+    '<button class="decode-ra-btn" onclick="hideDecodeResult();hideDecodePopup()">&#x2715; Close</button></div>';
+  document.body.appendChild(rp);
+}
+function showDecodePopup(x,y,text){
+  _ensureDecodeUI();
+  _selText=text;
+  const detected=detectEncodings(text);
+  const dd=document.getElementById('decDetected');
+  if(detected.length){
+    dd.innerHTML='<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Auto-detected:</div>'+
+      detected.map(id=>{
+        const e=ENCODINGS.find(e=>e.id===id);
+        return `<span class="enc-badge ${e.cls}" style="cursor:pointer;margin-bottom:3px" onclick="applyDecode('${id}')">${e.badge} — ${e.label}</span>`;
+      }).join('');
+  } else {
+    dd.innerHTML='<span style="font-size:10px;color:var(--muted)">No encoding detected — try manually:</span>';
+  }
+  document.getElementById('decOpts').innerHTML=
+    ENCODINGS.map(e=>`<button class="decode-btn${detected.includes(e.id)?' detected':''}" onclick="applyDecode('${e.id}')">${e.label}</button>`).join('');
+  const popup=document.getElementById('decodePopup');
+  popup.classList.add('visible');
+  const pw=280,ph=220;
+  let px=x,py=y+14;
+  if(px+pw>window.innerWidth-10)px=window.innerWidth-pw-10;
+  if(py+ph>window.innerHeight-10)py=y-ph-10;
+  popup.style.left=px+'px';popup.style.top=py+'px';
+}
+
+function hideDecodePopup(){
+  const p=document.getElementById('decodePopup');if(p)p.classList.remove('visible');
+}
+function hideDecodeResult(){
+  const r=document.getElementById('decodeResult');if(r)r.classList.remove('visible');
+}
+
+function applyDecode(method, fromChain){
+  const enc=ENCODINGS.find(e=>e.id===method);
+  if(!enc)return;
+  const inputText=fromChain ? document.getElementById('decResBody').textContent : _selText;
+  if(!inputText)return;
+
+  if(fromChain){
+    const prevText=document.getElementById('decResBody').textContent;
+    const prevTitle=document.getElementById('decResTitle').textContent;
+    if(prevText) _decodeHistory.push({label:prevTitle,text:prevText});
+  } else {
+    _decodeHistory=[];
+  }
+
+  const res=enc.decode(inputText);
+  document.getElementById('decResTitle').textContent=enc.label+(res.ok?' \u2713':' \u26a0 Error');
+  document.getElementById('decResBody').textContent=res.val;
+  _updateBreadcrumb(enc.label);
+  _updateChain(res.ok ? res.val : '');
+
+  const popup=document.getElementById('decodePopup');
+  const rect=popup.getBoundingClientRect();
+  const r=document.getElementById('decodeResult');
+  const rw=Math.min(480,window.innerWidth-20);
+  let rx=rect.left,ry=rect.bottom+8;
+  if(rx+rw>window.innerWidth-10)rx=Math.max(5,window.innerWidth-rw-10);
+  if(ry+320>window.innerHeight-10)ry=Math.max(5,rect.top-320-8);
+  r.style.left=rx+'px';r.style.top=ry+'px';r.style.width=rw+'px';
+  r.classList.add('visible');
+  document.getElementById('decRevertBtn').style.display=_decodeHistory.length?'':'none';
+}
+
+function _updateBreadcrumb(currentLabel){
+  const bc=document.getElementById('decBreadcrumb');
+  if(!bc)return;
+  if(!_decodeHistory.length){bc.style.display='none';bc.innerHTML='';return;}
+  bc.style.display='flex';
+  bc.innerHTML=_decodeHistory.map((h,i)=>
+    `<span style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="_jumpHistory(${i})">${h.label}</span>`+
+    `<span style="color:var(--border);margin:0 2px"> \u203a </span>`
+  ).join('')+`<span style="color:var(--text)">${currentLabel}</span>`;
+}
+
+function _jumpHistory(idx){
+  const entry=_decodeHistory[idx];
+  if(!entry)return;
+  document.getElementById('decResBody').textContent=entry.text;
+  document.getElementById('decResTitle').textContent=entry.label;
+  _decodeHistory=_decodeHistory.slice(0,idx);
+  _updateBreadcrumb(entry.label);
+  _updateChain(entry.text);
+  document.getElementById('decRevertBtn').style.display=_decodeHistory.length?'':'none';
+}
+
+function _updateChain(resultText){
+  const chain=document.getElementById('decChain');
+  const opts=document.getElementById('decChainOpts');
+  if(!chain||!opts)return;
+  // Auto-detect so we can highlight suggested decoders, but always show ALL
+  const detected=detectEncodings(resultText);
+  if(resultText.trim().startsWith('<')&&!detected.includes('xml'))detected.push('xml');
+  chain.style.display='block';
+  opts.innerHTML=ENCODINGS.map(e=>{
+    const isDetected=detected.includes(e.id);
+    return`<button class="decode-btn${isDetected?' detected':''}" title="${isDetected?'Auto-detected':''}" onclick="applyDecode('${e.id}',true)">${e.label}${isDetected?' ✦':''}</button>`;
+  }).join('');
+}
+function cpDecoded(){
+  const b=document.getElementById('decResBody');if(!b)return;
+  navigator.clipboard.writeText(b.textContent).then(()=>{
+    const btn=document.getElementById('cpDecBtn');
+    if(btn){const o=btn.textContent;btn.textContent='✓ Copied';btn.classList.add('ok');
+      setTimeout(()=>{btn.textContent=o;btn.classList.remove('ok')},2000);}
+  });
+}
+function revertDecode(){
+  if(_decodeHistory.length){
+    const prev=_decodeHistory.pop();
+    document.getElementById('decResBody').textContent=prev.text;
+    document.getElementById('decResTitle').textContent=prev.label;
+    _updateBreadcrumb(prev.label);
+    _updateChain(prev.text);
+    document.getElementById('decRevertBtn').style.display=_decodeHistory.length?'':'none';
+  } else {
+    hideDecodeResult(); hideDecodePopup();
+  }
+}
+
+document.addEventListener('mouseup',e=>{
+  if(e.target.closest('#decodePopup')||e.target.closest('#decodeResult'))return;
+  const sel=window.getSelection();
+  if(!sel||sel.isCollapsed){
+    if(!e.target.closest('#decodePopup'))hideDecodePopup();
+    return;
+  }
+  const text=sel.toString().trim();
+  if(text.length<5){hideDecodePopup();return;}
+  const anchor=sel.anchorNode?.parentElement;
+  if(!anchor?.closest('#detailPanel')){hideDecodePopup();return;}
+  showDecodePopup(e.clientX,e.clientY,text);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){hideDecodePopup();hideDecodeResult();}
+});
 
 /* ── Init ──────────────────────────────────────────────────────────────────── */
 init();

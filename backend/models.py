@@ -29,6 +29,8 @@ class RequestDetail(BaseModel):
     body: Optional[str] = None
     body_mime_type: Optional[str] = None
     body_parsed: Optional[Any] = None
+    body_decoded: Optional[str] = None   # all decoded layers, pre-expanded at ingestion
+    headers_decoded: Optional[str] = None  # header values expanded
 
 
 class ResponseDetail(BaseModel):
@@ -40,6 +42,8 @@ class ResponseDetail(BaseModel):
     body_mime_type: Optional[str] = None
     body_parsed: Optional[Any] = None
     redirect_url: Optional[str] = None
+    body_decoded: Optional[str] = None   # all decoded layers, pre-expanded at ingestion
+    headers_decoded: Optional[str] = None  # header values expanded
 
 
 class TimingInfo(BaseModel):
@@ -88,19 +92,39 @@ class FilterStats(BaseModel):
 
 # ── Custom Filter ──────────────────────────────────────────────────────────────
 
+class CombinationEntry(BaseModel):
+    """
+    A combination defines a multi-field signal that should appear together
+    in a branch (root → node path).  All non-empty keyword lists must be
+    satisfied (field-specific, case-insensitive).
+
+    100 % → "Found"   |   1–99 % → "Partial"   |   0 % → "Not found"
+    """
+    name: str = "Combination"
+    description: Optional[str] = None
+    url_keywords: List[str] = Field(default_factory=list)
+    req_header_keywords: List[str] = Field(default_factory=list)
+    res_header_keywords: List[str] = Field(default_factory=list)
+    req_body_keywords: List[str] = Field(default_factory=list)
+    res_body_keywords: List[str] = Field(default_factory=list)
+
+
 class CustomFilterConfig(BaseModel):
     """
     Configuration for the custom keyword filter.
 
     match_mode = "any_field":
         A node matches if ANY keyword in the relevant field list appears in
-        the corresponding part of the request/response.  Branches that contain
-        at least one match are preserved in full below the match point.
+        the corresponding part of the request/response.
 
     match_mode = "keyword_list":
-        A branch is preserved when the accumulated text from the tree root down
-        to (and including) a node collectively contains ALL keywords in
-        `keyword_list`.  Individual field filters are ignored in this mode.
+        A branch is preserved when the accumulated text from root to the node
+        collectively contains ALL keywords in `keyword_list`.
+
+    combinations:
+        Each combination is evaluated branch-by-branch across the filtered
+        tree.  All keywords in a combination must appear in their respective
+        fields somewhere along the branch path.
     """
 
     version: str = "1.0"
@@ -119,6 +143,9 @@ class CustomFilterConfig(BaseModel):
     keyword_list: List[Any] = Field(default_factory=list)
 
     match_mode: Literal["any_field", "keyword_list"] = "any_field"
+
+    # Combinations — always evaluated regardless of match_mode
+    combinations: List[CombinationEntry] = Field(default_factory=list)
 
 
 class CustomFilterRequest(BaseModel):

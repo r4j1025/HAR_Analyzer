@@ -1,67 +1,77 @@
 """
 custom_filter.py
 ─────────────────
-Two filter strategies:
+Three filter strategies + combination detection:
 
-any_field  –  node-level matching; if a node's URL / headers / body contains
-              ANY keyword from the configured lists, that node and its entire
-              subtree are kept.  Ancestor nodes are kept as path nodes.
+any_field      –  node-level; a node matches if any keyword from the relevant
+                  field list appears in the corresponding part of request/response.
 
-keyword_list (AND) –  branch-level matching; a branch (root → node) is kept
-              when the *accumulated* text from root down to that node
-              collectively contains ALL keywords in the list.
+keyword_list   –  branch-level AND; a branch (root→node) is kept when the
+                  accumulated text collectively contains ALL keywords.
 
-Match info  –  both strategies return `match_info`: a list of
-              {node_id, url, path, method, status, matches[]} describing
-              which keywords matched each node and the actual text found.
-
-Keyword summary  –  `keyword_summary` is a new field in the output.
-              It lists ALL keywords from the config (matched or not) grouped
-              by category, each with a `matched` bool and a `hits` list so
-              the UI can render ✅/❌ per keyword with result details.
+combinations   –  always evaluated; each combination checks whether ALL its
+                  field-specific keywords are present somewhere in a branch.
+                  100% → Found | 1-99% → Partial (with %) | 0% → Not found.
 """
 from __future__ import annotations
 
 from typing import List, Optional
 
-from models import CustomFilterConfig, RequestNode
+from decoder import expand_body, expand_header_value, expand_headers
+from models import CombinationEntry, CustomFilterConfig, RequestNode
+
+
 
 
 # ── Keyword entry helpers ──────────────────────────────────────────────────────
-# Keywords are either plain strings ("token") or weighted dicts
-# ({"keyword": "token", "weight": 9}).  These two helpers normalise access.
 
 def _kw_str(entry) -> str:
-    """Return the keyword string regardless of entry format."""
-    return entry["keyword"] if isinstance(entry, dict) else entry
+    """Return the keyword string regardless of plain-string or weighted-dict format."""
+    return entry["keyword"] if isinstance(entry, dict) else str(entry)
 
 
 def _kw_weight(entry) -> int:
-    """Return the weight (1-10); default 5 for plain-string entries."""
+    """Return weight; default 5 for plain-string entries."""
     return int(entry.get("weight", 5)) if isinstance(entry, dict) else 5
 
 
 # ── Text extraction helpers ────────────────────────────────────────────────────
 
 def _fields(node: RequestNode) -> dict:
-    """Return searchable text per logical field."""
-    req_hdrs = "\n".join(f"{h.name}: {h.value}" for h in node.request.headers)
-    res_hdrs = "\n".join(f"{h.name}: {h.value}" for h in node.response.headers)
+    """
+    Return searchable text per logical field.
 
-    def _body_text(body, parsed):
-        parts = [body or ""]
-        if isinstance(parsed, dict):
-            parts.append(" ".join(f"{k} {v}" for k, v in parsed.items()))
-        elif isinstance(parsed, list):
-            parts.append(str(parsed))
-        return "\n".join(parts)
+    Uses pre-decoded body_decoded and headers_decoded fields that were
+    computed at ingestion time by decoder.py.  Falls back to runtime
+    expansion if the decoded fields are absent (e.g. old tree data).
+    """
+    # ── Headers ──────────────────────────────────────────────────────────────
+    req_hdrs = (
+        node.request.headers_decoded
+        or expand_headers(node.request.headers)
+    )
+    res_hdrs = (
+        node.response.headers_decoded
+        or expand_headers(node.response.headers)
+    )
 
-    req_body = _body_text(node.request.body, node.request.body_parsed)
-    res_body = _body_text(node.response.body, node.response.body_parsed)
-
+    # ── Cookies ──────────────────────────────────────────────────────────────
     req_cookie_text = " ".join(f"{c.name} {c.value}" for c in node.request.cookies)
     res_cookie_text = " ".join(
         f"{h.value}" for h in node.response.headers if h.name.lower() == "set-cookie"
+    )
+
+    # ── Bodies ───────────────────────────────────────────────────────────────
+    # Use pre-decoded if available; fall back to runtime expand_body.
+    req_body = (
+        node.request.body_decoded
+        or expand_body(node.request.body, node.request.body_parsed)
+        or ""
+    )
+    res_body = (
+        node.response.body_decoded
+        or expand_body(node.response.body, node.response.body_parsed)
+        or ""
     )
 
     return {
@@ -96,21 +106,29 @@ _FIELD_LABELS = {
     "res_body":   "Response Body",
 }
 
-# Map config field name → (display label, internal key)
 _CATEGORY_MAP = [
     ("URL Keywords",             "url_keywords",        "URL"),
     ("Request Header Keywords",  "req_header_keywords", "Request Header"),
     ("Response Header Keywords", "res_header_keywords", "Response Header"),
     ("Request Body Keywords",    "req_body_keywords",   "Request Body"),
     ("Response Body Keywords",   "res_body_keywords",   "Response Body"),
-    ("AND Keyword List",         "keyword_list",        None),  # None = any field
+    ("AND Keyword List",         "keyword_list",        None),
+]
+
+# Mapping from CombinationEntry field name → internal field key
+_COMBO_FIELD_MAP = [
+    ("url_keywords",        "url"),
+    ("req_header_keywords", "req_header"),
+    ("res_header_keywords", "res_header"),
+    ("req_body_keywords",   "req_body"),
+    ("res_body_keywords",   "res_body"),
 ]
 
 
 # ── Match helpers ─────────────────────────────────────────────────────────────
 
 def _get_matches(node: RequestNode, cfg: CustomFilterConfig) -> list:
-    """Return list of {keyword, field, actual} for every keyword hit on this node."""
+    """Return {keyword, field, actual} for every keyword hit on this node."""
     f = _fields(node)
     hits = []
     checks = [
@@ -180,7 +198,7 @@ def _filter_any_field(
 
 def _filter_keyword_list(
     node: RequestNode,
-    keywords: List[str],
+    keywords: List,
     ancestor_text: str = "",
     match_info: list = None,
 ) -> Optional[RequestNode]:
@@ -188,7 +206,7 @@ def _filter_keyword_list(
         match_info = []
 
     current_text = ancestor_text + "\n" + _fields(node)["all"]
-    kws = [_kw_str(kw).lower() for kw in keywords if _kw_str(kw).strip()]
+    kws = [_kw_str(kw).strip().lower() for kw in keywords if _kw_str(kw).strip()]
 
     if all(kw in current_text.lower() for kw in kws):
         hits = []
@@ -233,23 +251,6 @@ def _filter_keyword_list(
 # ── Keyword summary builder ────────────────────────────────────────────────────
 
 def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
-    """
-    Build a per-category, per-keyword summary that includes ALL configured
-    keywords (matched or not), so the UI can render ✅/❌ per keyword and
-    show hit details beneath matched ones.
-
-    Structure:
-      {
-        "URL Keywords": [
-          {"keyword": "/oauth", "matched": true,  "hits": [{node_id, url, method, path, field, actual}, ...]},
-          {"keyword": "/login", "matched": false, "hits": []},
-          ...
-        ],
-        "Request Header Keywords": [...],
-        ...
-      }
-    """
-    # Build reverse index: lowercase_keyword → list of hit dicts
     kw_to_hits: dict = {}
     for record in match_info:
         for m in record.get("matches", []):
@@ -273,15 +274,11 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
 
         entries = []
         for raw_entry in keywords:
-            kw = _kw_str(raw_entry).strip()
+            kw     = _kw_str(raw_entry).strip()
             if not kw:
                 continue
-
-            weight    = _kw_weight(raw_entry)
-            all_hits  = kw_to_hits.get(kw.lower(), [])
-
-            # For field-specific categories, only count hits from the right field.
-            # For keyword_list (field_filter=None), accept hits from any field.
+            weight = _kw_weight(raw_entry)
+            all_hits = kw_to_hits.get(kw.lower(), [])
             if field_filter is not None:
                 relevant_hits = [h for h in all_hits if h["field"] == field_filter]
             else:
@@ -300,40 +297,168 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
     return summary
 
 
+# ── Combination matching ───────────────────────────────────────────────────────
+
+def _combo_check_branch(combo: CombinationEntry, branch_acc: dict) -> tuple:
+    """
+    Check a combination against accumulated branch field texts.
+    Returns (matched_list, unmatched_list, total_count, pct).
+    """
+    matched   = []
+    unmatched = []
+
+    for cfg_field, field_key in _COMBO_FIELD_MAP:
+        kw_list = getattr(combo, cfg_field, [])
+        for kw_entry in kw_list:
+            kw = kw_entry.strip() if isinstance(kw_entry, str) else str(kw_entry).strip()
+            if not kw:
+                continue
+            label = _FIELD_LABELS[field_key]
+            if _ci_contains(branch_acc[field_key], kw):
+                matched.append({"keyword": kw, "field": label})
+            else:
+                unmatched.append({"keyword": kw, "field": label})
+
+    total = len(matched) + len(unmatched)
+    pct   = round(len(matched) / total * 100) if total > 0 else 0
+    return matched, unmatched, total, pct
+
+
+def _match_combinations_in_tree(
+    root: Optional[RequestNode],
+    orphans: List[RequestNode],
+    combinations: List[CombinationEntry],
+) -> list:
+    """
+    For every CombinationEntry, walk every branch (root→node) in the tree
+    and all orphan nodes, tracking the best (highest-%) match found.
+
+    Returns a list of result dicts:
+      {name, description, status, match_pct, total_keywords,
+       matched_keywords, unmatched_keywords, matching_branches}
+    """
+    if not combinations:
+        return []
+
+    _empty_acc = {k: "" for k in _FIELD_LABELS}
+
+    results = []
+
+    for combo in combinations:
+        # Collect all keywords for display
+        all_kw_labels = []
+        for cfg_field, field_key in _COMBO_FIELD_MAP:
+            for kw_entry in getattr(combo, cfg_field, []):
+                kw = kw_entry.strip() if isinstance(kw_entry, str) else str(kw_entry).strip()
+                if kw:
+                    all_kw_labels.append({"keyword": kw, "field": _FIELD_LABELS[field_key]})
+        total_kws = len(all_kw_labels)
+
+        full_matches: list    = []
+        best_pct: int         = 0
+        best_matched: list    = []
+        best_unmatched: list  = []
+
+        def _walk(node: RequestNode, acc: dict, path: list):
+            nonlocal best_pct, best_matched, best_unmatched
+
+            f       = _fields(node)
+            new_acc = {k: acc[k] + "\n" + f[k] for k in acc}
+            new_path = path + [{"url": node.url, "method": node.method, "path": node.path}]
+
+            matched, unmatched, total, pct = _combo_check_branch(combo, new_acc)
+
+            if total > 0:
+                if pct == 100:
+                    full_matches.append({
+                        "branch_path":      new_path,
+                        "deepest_node_id":  node.id,
+                        "deepest_url":      node.url,
+                        "deepest_method":   node.method,
+                        "deepest_path":     node.path,
+                        "matched_keywords": matched,
+                    })
+                elif pct > best_pct:
+                    best_pct       = pct
+                    best_matched   = matched
+                    best_unmatched = unmatched
+
+            for child in node.children:
+                _walk(child, new_acc, new_path)
+
+        if root is not None:
+            _walk(root, dict(_empty_acc), [])
+
+        for orphan in orphans:
+            f   = _fields(orphan)
+            acc = {k: f[k] for k in _empty_acc}
+            matched, unmatched, total, pct = _combo_check_branch(combo, acc)
+            if total > 0:
+                if pct == 100:
+                    full_matches.append({
+                        "branch_path":      [{"url": orphan.url, "method": orphan.method, "path": orphan.path}],
+                        "deepest_node_id":  orphan.id,
+                        "deepest_url":      orphan.url,
+                        "deepest_method":   orphan.method,
+                        "deepest_path":     orphan.path,
+                        "matched_keywords": matched,
+                    })
+                elif pct > best_pct:
+                    best_pct       = pct
+                    best_matched   = matched
+                    best_unmatched = unmatched
+
+        if full_matches:
+            results.append({
+                "name":               combo.name,
+                "description":        combo.description or "",
+                "status":             "found",
+                "match_pct":          100,
+                "total_keywords":     total_kws,
+                "matched_keywords":   full_matches[0]["matched_keywords"],
+                "unmatched_keywords": [],
+                "matching_branches":  full_matches[:5],
+            })
+        elif best_pct > 0:
+            results.append({
+                "name":               combo.name,
+                "description":        combo.description or "",
+                "status":             "partial",
+                "match_pct":          best_pct,
+                "total_keywords":     total_kws,
+                "matched_keywords":   best_matched,
+                "unmatched_keywords": best_unmatched,
+                "matching_branches":  [],
+            })
+        else:
+            results.append({
+                "name":               combo.name,
+                "description":        combo.description or "",
+                "status":             "not_found",
+                "match_pct":          0,
+                "total_keywords":     total_kws,
+                "matched_keywords":   [],
+                "unmatched_keywords": all_kw_labels,
+                "matching_branches":  [],
+            })
+
+    return results
+
+
 # ── Protocol score ─────────────────────────────────────────────────────────────
 
-# Number of top-weighted keywords whose combined weight defines "100% confident".
-# A HAR only captures what the browser did — most keywords will simply be absent
-# because that endpoint was never hit.  Dividing by the weight of ALL keywords
-# (including ones that could never appear together) gives an unfairly low score.
-# Instead we ask: "did we find the equivalent of the N strongest signals?"
 _SATURATION_TOP_N = 5
 
 
 def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> dict:
     """
-    Compute a weighted confidence score using a saturation-threshold denominator.
-
-    Rationale
-    ---------
-    A HAR file only records requests that actually happened, so most keywords in
-    a large filter will simply be absent - not because the protocol is not in use,
-    but because those endpoints were never hit during the recording.  Dividing by
-    the total weight of all keywords punishes the score for absence of evidence,
-    producing "Not detected" even when definitive signals (SAMLRequest,
-    saml:Assertion) are present.
-
-    Fix: denominator = sum of the top-N keyword weights (default N=5).
-    Interpretation: "if you found signals equivalent to the 5 strongest possible
-    keywords for this protocol, we are fully confident."  Scores above 100 are
-    capped, so matching more than 5 strong keywords never penalises the result.
-
-    Verdict thresholds (on the capped 0-100 scale):
-      >= 70 -> Confirmed  |  >= 40 -> Likely  |  >= 15 -> Possible  |  < 15 -> Not detected
+    Weighted confidence score using saturation-threshold denominator.
+    denominator = sum of top-N keyword weights (default N=5) so that
+    finding the N strongest signals gives 100% confidence.
     """
-    all_weights = []
-    earned      = 0
-    evidence    = []
+    all_weights: list = []
+    earned:      int  = 0
+    evidence:    list = []
 
     for cat_name, entries in keyword_summary.items():
         for entry in entries:
@@ -348,14 +473,10 @@ def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> d
                     "hits":     len(entry["hits"]),
                 })
 
-    # Saturation point = sum of the N highest weights in the whole config.
-    # This is the weight you would earn by finding the N most important signals.
     top_n_weights    = sorted(all_weights, reverse=True)[:_SATURATION_TOP_N]
-    saturation_point = sum(top_n_weights) or 1      # guard against empty config
-    total_weight     = sum(all_weights)              # kept for display only
-
-    # Cap at 100: finding more than N strong signals does not lower confidence.
-    score = min(100, round(earned / saturation_point * 100))
+    saturation_point = sum(top_n_weights) or 1
+    total_weight     = sum(all_weights)
+    score            = min(100, round(earned / saturation_point * 100))
 
     verdict = (
         "Confirmed"    if score >= 70 else
@@ -377,7 +498,7 @@ def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> d
     }
 
 
-
+# ── Public API ─────────────────────────────────────────────────────────────────
 
 def _count(node: Optional[RequestNode]) -> int:
     if node is None:
@@ -442,18 +563,32 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
                         "matches": hits,
                     })
 
-    keyword_summary = _build_keyword_summary(cfg, match_info)
-    protocol_score  = _compute_protocol_score(cfg, keyword_summary)
+    keyword_summary    = _build_keyword_summary(cfg, match_info)
+    protocol_score     = _compute_protocol_score(cfg, keyword_summary)
+
+    # ── Combination matching ── always runs on the FULL original tree
+    # (not the filtered sub-tree) so combinations catch cross-branch signals
+    full_root:    Optional[RequestNode] = None
+    full_orphans: List[RequestNode]     = []
+    if tree_dict:
+        full_root = RequestNode.model_validate(tree_dict)
+    for od in orphan_dicts:
+        full_orphans.append(RequestNode.model_validate(od))
+
+    combination_results = _match_combinations_in_tree(
+        full_root, full_orphans, cfg.combinations
+    )
 
     return {
-        "root_url":           payload.get("root_url", ""),
-        "har_files":          payload.get("har_files", []),
-        "total_custom_nodes": _count(filtered_root) + len(filtered_orphans),
-        "original_total":     payload.get("total_entries_filtered", 0),
-        "tree":               filtered_root.model_dump(exclude_none=True) if filtered_root else None,
-        "orphan_nodes":       [o.model_dump(exclude_none=True) for o in filtered_orphans],
-        "filter_config":      cfg.model_dump(),
-        "match_info":         match_info,
-        "keyword_summary":    keyword_summary,
-        "protocol_score":     protocol_score,
+        "root_url":            payload.get("root_url", ""),
+        "har_files":           payload.get("har_files", []),
+        "total_custom_nodes":  _count(filtered_root) + len(filtered_orphans),
+        "original_total":      payload.get("total_entries_filtered", 0),
+        "tree":                filtered_root.model_dump(exclude_none=True) if filtered_root else None,
+        "orphan_nodes":        [o.model_dump(exclude_none=True) for o in filtered_orphans],
+        "filter_config":       cfg.model_dump(),
+        "match_info":          match_info,
+        "keyword_summary":     keyword_summary,
+        "protocol_score":      protocol_score,
+        "combination_results": combination_results,
     }
