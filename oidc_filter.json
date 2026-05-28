@@ -1,0 +1,101 @@
+{
+  "version": "1.0",
+  "name": "OIDC Filter",
+  "description": "Filters for OpenID Connect flows: discovery, ID tokens, UserInfo, JWKS, nonce-based flows, and OIDC-specific IdP domains. Focuses on signals unique to OIDC on top of OAuth 2.0. Generic JWT claims (sub, iss, exp) are down-weighted heavily as they appear in many non-OIDC contexts.",
+  "match_mode": "any_field",
+  "url_keywords": [
+    { "keyword": "/oidc",                                       "weight": 9  },
+    { "keyword": "/.well-known/openid-configuration",           "weight": 10 },
+    { "keyword": "/.well-known/jwks.json",                      "weight": 9  },
+    { "keyword": "/userinfo",                                   "weight": 8  },
+    { "keyword": "/user-info",                                  "weight": 8  },
+    { "keyword": "/jwks",                                       "weight": 8  },
+    { "keyword": "/jwks.json",                                  "weight": 9  },
+    { "keyword": "?nonce=",                                     "weight": 8  },
+    { "keyword": "?id_token=",                                  "weight": 10 },
+    { "keyword": "?response_type=",                             "weight": 5  },
+    { "keyword": "accounts.google.com",                         "weight": 6  },
+    { "keyword": "oauth2.googleapis.com",                       "weight": 8  },
+    { "keyword": "openidconnect.googleapis.com",                "weight": 10 },
+    { "keyword": "identitytoolkit.googleapis.com",              "weight": 8  },
+    { "keyword": "securetoken.googleapis.com",                  "weight": 8  },
+    { "keyword": "login.microsoftonline.com",                   "weight": 8  },
+    { "keyword": "login.live.com",                              "weight": 5  },
+    { "keyword": "appleid.apple.com",                           "weight": 7  },
+    { "keyword": "auth0.com",                                   "weight": 8  },
+    { "keyword": "okta.com",                                    "weight": 7  },
+    { "keyword": "onelogin.com",                                "weight": 6  },
+    { "keyword": "pingone.com",                                 "weight": 6  },
+    { "keyword": "pingidentity.com",                            "weight": 6  },
+    { "keyword": "keycloak",                                    "weight": 6  },
+    { "keyword": "openid.",                                     "weight": 8  },
+    { "keyword": "oidc.",                                       "weight": 9  }
+  ],
+  "req_header_keywords": [
+    { "keyword": "Bearer",         "weight": 7  },
+    { "keyword": "x-id-token",     "weight": 10 },
+    { "keyword": "x-access-token", "weight": 7  },
+    { "keyword": "dpop",           "weight": 9  }
+  ],
+  "res_header_keywords": [
+    { "keyword": "x-id-token",   "weight": 10 },
+    { "keyword": "dpop-nonce",   "weight": 9  }
+  ],
+  "req_body_keywords": [
+    { "keyword": "nonce",                   "weight": 8  },
+    { "keyword": "id_token_hint",           "weight": 10 },
+    { "keyword": "post_logout_redirect_uri","weight": 8  },
+    { "keyword": "response_type",           "weight": 5  },
+    { "keyword": "client_id",               "weight": 6  },
+    { "keyword": "code_verifier",           "weight": 7  }
+  ],
+  "res_body_keywords": [
+    { "keyword": "id_token",               "weight": 10 },
+    { "keyword": "authorization_endpoint", "weight": 9  },
+    { "keyword": "token_endpoint",         "weight": 8  },
+    { "keyword": "userinfo_endpoint",      "weight": 10 },
+    { "keyword": "jwks_uri",               "weight": 9  },
+    { "keyword": "issuer",                 "weight": 5  },
+    { "keyword": "sub",                    "weight": 2  },
+    { "keyword": "aud",                    "weight": 2  },
+    { "keyword": "iss",                    "weight": 2  },
+    { "keyword": "exp",                    "weight": 1  },
+    { "keyword": "iat",                    "weight": 1  },
+    { "keyword": "nonce",                  "weight": 8  },
+    { "keyword": "at_hash",                "weight": 9  },
+    { "keyword": "c_hash",                 "weight": 9  },
+    { "keyword": "azp",                    "weight": 7  },
+    { "keyword": "IdToken",                "weight": 9  },
+    { "keyword": "access_token",           "weight": 7  }
+  ],
+  "keyword_list": [],
+  "combinations": [
+    {
+      "name": "OIDC Discovery + Token Fetch",
+      "description": "Client fetches the OpenID Provider metadata document first, then uses the discovered endpoints to obtain an id_token. Confirms standards-compliant OIDC flow.",
+      "url_keywords":        ["/.well-known/openid-configuration"],
+      "req_header_keywords": [],
+      "res_header_keywords": [],
+      "req_body_keywords":   [],
+      "res_body_keywords":   ["id_token"]
+    },
+    {
+      "name": "OIDC Authorization Code + ID Token",
+      "description": "Client exchanges an authorization code at the token endpoint and receives both an access_token and id_token. Core OIDC hybrid or code flow.",
+      "url_keywords":        [],
+      "req_header_keywords": [],
+      "res_header_keywords": [],
+      "req_body_keywords":   ["nonce"],
+      "res_body_keywords":   ["id_token", "access_token"]
+    },
+    {
+      "name": "OIDC UserInfo Endpoint Call",
+      "description": "Client calls /userinfo with a Bearer access_token. Server returns claims (sub, email, etc.). Confirms OIDC resource access post-authentication.",
+      "url_keywords":        ["/userinfo"],
+      "req_header_keywords": ["Bearer"],
+      "res_header_keywords": [],
+      "req_body_keywords":   [],
+      "res_body_keywords":   ["sub"]
+    }
+  ]
+}

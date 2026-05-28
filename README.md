@@ -1,152 +1,130 @@
-# HAR Tree Analyzer v2
+# 🔍 HAR Tree Analyzer
 
-Parse browser HAR files into a navigable request/response tree, then filter it
-by **auth flows** or **custom keywords** — built for both humans and AI agents.
+Parse browser `.har` files into an interactive request/response tree. Instantly filter auth flows, search by keywords, decode JWTs and Base64 values inline, and trace OAuth / SAML / Cognito flows without reading raw JSON.
 
-## Architecture
+---
+
+## What it does
+
+- **Tree builder** — converts flat HAR entries into a parent → child request tree using Referer headers, redirect chains, and path-prefix matching
+- **Noise filter** — automatically strips analytics, fonts, images, and CDN requests
+- **Auth filter** — detects OAuth 2.0, OIDC, SAML, Cognito, session cookies, and 40+ other auth signals
+- **Custom filter** — keyword search across URL, headers, and request/response bodies (with weights)
+- **Combination matching** — multi-field rules to confirm end-to-end flows (e.g. full PKCE exchange)
+- **Inline decoder** — select any text in the UI to decode JWT, Base64, URL-encoded, XML, or Hex values
+
+---
+
+## Project structure
 
 ```
-┌─────────────────────────────────────┐
-│          Streamlit UI (8501)         │
-│  Home.py       pages/Custom_Filter  │
-│     └── utils/api_client.py  ───────┼──► FastAPI (8000)
-│     └── utils/tree_renderer.py      │       ├── /api/analyze
-└─────────────────────────────────────┘       ├── /api/filter-auth
-                                              ├── /api/filter-custom
-                                              └── /api/validate-filter-config
+har_analyzer/
+├── frontend/          # Streamlit web UI
+│   ├── Home.py
+│   ├── pages/
+│   │   └── Custom_Filter.py
+│   ├── utils/
+│   │   ├── api_client.py
+│   │   └── tree_renderer.py
+│   └── requirements.txt
+│
+└── backend/           # FastAPI REST API
+    ├── main.py
+    ├── har_processor.py
+    ├── decoder.py
+    ├── auth_filter.py
+    ├── custom_filter.py
+    ├── models.py
+    ├── default_filter.json
+    └── requirements.txt
 ```
 
-All UI interactions go through the REST API — making every feature accessible
-to AI agents via HTTP without touching the Streamlit layer.
+---
 
-## Quick Start
+## Getting started
+
+You need **two terminals** running simultaneously — one for the frontend, one for the backend.
+
+### Terminal 1 — Frontend (Streamlit UI)
 
 ```bash
-# one command: installs deps and starts both services
-./run.sh
-
-# or manually:
-cd backend  && pip install -r requirements.txt && uvicorn main:app --reload --port 8000
-cd frontend && pip install -r requirements.txt && streamlit run Home.py
+cd har_analyzer
+cd .\frontend\
+python -m venv .venv        # only first time
+.venv\Scripts\activate
+pip install -r requirements.txt    # only first time
+streamlit run Home.py --server.port 8501
 ```
 
-Open **http://localhost:8501** for the UI, **http://localhost:8000/docs** for
-the Swagger API explorer.
+Open **http://localhost:8501** in your browser.
 
-## Features
+### Terminal 2 — Backend (FastAPI)
 
-### Tree View
-- Full request/response tree rooted at your chosen URL
-- Expand/collapse nodes, click to inspect full headers + body
-- Real-time URL / method / status search
-- Copy node JSON, cURL command, or full tree JSON
-- Orphan nodes (cross-domain) shown in a separate panel
-
-### Auth Filter (`POST /api/filter-auth`)
-Preserves nodes and their entire branches if they touch:
-- OAuth 2.0 / OIDC flows (authorize, token, userinfo, JWKS)
-- AWS Cognito (InitiateAuth, RespondToAuthChallenge, …)
-- SAML / SSO endpoints
-- Session & auth cookies
-- Authorization headers, 401/403 responses
-- Login / logout / password-reset paths
-
-### Custom Filter (`POST /api/filter-custom`)
-
-**Field Keywords mode** (`match_mode: "any_field"`):  
-Add keyword lists per field — URL, request headers, response headers, request
-body, response body. A node matches if any keyword appears in the corresponding
-field. The entire subtree below a match is preserved.
-
-**AND List mode** (`match_mode: "keyword_list"`):  
-Add multiple keywords; a branch is kept only when *all* keywords appear
-somewhere in the accumulated text from the tree root down to that node. Useful
-for tracing multi-step flows (e.g. keyword A in an early request, keyword B in
-a later response on the same path).
-
-Filter configs can be **saved as JSON** and **re-uploaded** in future sessions.
-
-## API Reference
-
-### `POST /api/analyze`
-```
-form-data:
-  root_url  string   https://app.example.com
-  har_files file[]   one or more .har files
-```
-Returns the full tree JSON.
-
-### `POST /api/filter-auth`
-```json
-Body: <output of /api/analyze>
-```
-Returns auth-filtered tree.
-
-### `POST /api/filter-custom`
-```json
-{
-  "root_url": "...",
-  "tree": { ... },
-  "orphan_nodes": [ ... ],
-  "config": {
-    "name": "My Filter",
-    "match_mode": "any_field",
-    "url_keywords": ["oauth", "/token"],
-    "req_header_keywords": ["Authorization"],
-    "res_header_keywords": ["Set-Cookie"],
-    "req_body_keywords": ["grant_type"],
-    "res_body_keywords": ["access_token"]
-  }
-}
+```bash
+cd har_analyzer
+cd .\backend\
+python -m venv .venv        # only first time
+.venv\Scripts\activate
+pip install -r requirements.txt    # only first time
+uvicorn main:app --reload --port 8000
 ```
 
-### `POST /api/validate-filter-config`
-```json
-Body: <CustomFilterConfig JSON>
-```
-Returns `{"valid": true, "config": {...}}` or `{"valid": false, "error": "..."}`.
+API docs available at **http://localhost:8000/docs**
 
-## Filter Config Schema
+> **Mac / Linux users:** replace `.venv\Scripts\activate` with `source .venv/bin/activate`
 
-```json
-{
-  "version": "1.0",
-  "name": "string",
-  "description": "string (optional)",
-  "match_mode": "any_field | keyword_list",
+---
 
-  // used when match_mode == "any_field"
-  "url_keywords":        ["string"],
-  "req_header_keywords": ["string"],
-  "res_header_keywords": ["string"],
-  "req_body_keywords":   ["string"],
-  "res_body_keywords":   ["string"],
+## Quick usage
 
-  // used when match_mode == "keyword_list"
-  "keyword_list": ["string"]
-}
-```
+1. Export a `.har` file from Chrome DevTools → Network tab → right-click → *Save all as HAR with content*
+2. Open the Streamlit UI, enter your site's root URL (e.g. `https://app.example.com`), and upload the HAR
+3. Click **Analyze** — the tree appears with noise already removed
+4. Click **Auth Filter** to narrow the tree to authentication flows only
+5. Use **Custom Filter** to search for specific keywords with weights and combinations
 
-## Project Layout
+---
 
-```
-har-analyzer/
-├── backend/
-│   ├── main.py            FastAPI app + all endpoints
-│   ├── models.py          Pydantic models (RequestNode, CustomFilterConfig …)
-│   ├── har_processor.py   HAR parsing → RequestNode tree
-│   ├── auth_filter.py     Auth-flow filter logic
-│   ├── custom_filter.py   Custom keyword filter logic
-│   └── requirements.txt
-├── frontend/
-│   ├── Home.py            Main Streamlit page (upload, tree, filter buttons)
-│   ├── pages/
-│   │   └── Custom_Filter.py   Keyword config UI
-│   ├── utils/
-│   │   ├── api_client.py      HTTP wrapper for backend
-│   │   └── tree_renderer.py   Self-contained HTML tree component
-│   └── requirements.txt
-├── .streamlit/config.toml
-├── run.sh
-└── README.md
-```
+## API endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/analyze` | Upload HAR files → returns full request tree |
+| `POST` | `/api/filter-auth` | Filter tree to auth-relevant nodes |
+| `POST` | `/api/filter-custom` | Filter tree by custom keyword config |
+| `GET`  | `/api/default-filter` | Return built-in default filter config |
+| `POST` | `/api/validate-filter-config` | Validate a filter config JSON |
+| `GET`  | `/api/health` | Health check |
+
+---
+
+## Screenshots
+
+![alt text](<Screenshot 2026-05-09 124638.png>)
+
+![alt text](<Screenshot 2026-05-28 125202.png>)
+
+![alt text](<Screenshot 2026-05-28 125238.png>)
+
+![alt text](<Screenshot 2026-05-28 125258.png>)
+
+![alt text](<Screenshot 2026-05-28 125313.png>)
+
+![alt text](<Screenshot 2026-05-28 125824.png>)
+
+![alt text](<Screenshot 2026-05-28 125343.png>)
+
+![alt text](<Screenshot 2026-05-28 125432.png>)
+
+---
+
+## Requirements
+
+- Python 3.11.9+
+- See `frontend/requirements.txt` and `backend/requirements.txt` for package lists
+
+---
+
+## ⚠ Security note
+
+HAR files contain raw credentials, tokens, and cookies. Never commit them to version control or share them publicly.
