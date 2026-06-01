@@ -37,8 +37,8 @@ AUTH_PATH_RE = re.compile(
     r'|\.well-known/(openid-configuration|oauth-authorization-server|jwks)'
     r'|login|logout|sign[_\-]?in|sign[_\-]?out|signout|signin'
     r'|session[s]?|auth|authenticate|authentication'
-    r'|callback|redirect|authorized|saml[2]?|sso'
-    r'|password|forgot[_\-]?password|reset[_\-]?password|change[_\-]?password'
+    r'|callback|redirect|authorized|saml[2]?sso|saml[2]?'
+    r'|sso|password|forgot[_\-]?password|reset[_\-]?password|change[_\-]?password'
     r'|credentials|mfa|totp|otp|two[_\-]?factor'
     r'|verify|verification|register|confirm|invite'
     r'|api[_\-]?key[s]?|AWSCognitoIdentityProviderService'
@@ -49,7 +49,8 @@ AUTH_PATH_RE = re.compile(
 AUTH_QUERY_RE = re.compile(
     r'[?&](code|state|nonce|id_token|access_token|token|grant_type'
     r'|response_type|client_id|redirect_uri|scope|code_challenge'
-    r'|code_verifier|error|error_description)=',
+    r'|code_verifier|error|error_description'
+    r'|SAMLRequest|SAMLResponse|RelayState)=',
     re.IGNORECASE,
 )
 

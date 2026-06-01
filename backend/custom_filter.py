@@ -41,19 +41,22 @@ def _fields(node: RequestNode) -> dict:
     """
     Return searchable text per logical field.
 
-    Uses pre-decoded body_decoded and headers_decoded fields that were
-    computed at ingestion time by decoder.py.  Falls back to runtime
-    expansion if the decoded fields are absent (e.g. old tree data).
+    Headers are ALWAYS re-expanded at query time by calling expand_headers()
+    directly — we never rely solely on headers_decoded stored at ingestion,
+    because the decoder may have been updated after the HAR was processed
+    (e.g. SAML deflate support added later).  The stored headers_decoded is
+    appended as extra text so nothing is lost.
+
+    Bodies use body_decoded (pre-expanded at ingestion) with a live fallback.
     """
-    # ── Headers ──────────────────────────────────────────────────────────────
-    req_hdrs = (
-        node.request.headers_decoded
-        or expand_headers(node.request.headers)
-    )
-    res_hdrs = (
-        node.response.headers_decoded
-        or expand_headers(node.response.headers)
-    )
+    # ── Headers: always expand live + merge stored decoded ───────────────────
+    req_hdrs_live   = expand_headers(node.request.headers)
+    res_hdrs_live   = expand_headers(node.response.headers)
+    # Append anything from the stored decoded that isn't already in live
+    req_hdrs_stored = node.request.headers_decoded or ""
+    res_hdrs_stored = node.response.headers_decoded or ""
+    req_hdrs = req_hdrs_live + ("\n" + req_hdrs_stored if req_hdrs_stored else "")
+    res_hdrs = res_hdrs_live + ("\n" + res_hdrs_stored if res_hdrs_stored else "")
 
     # ── Cookies ──────────────────────────────────────────────────────────────
     req_cookie_text = " ".join(f"{c.name} {c.value}" for c in node.request.cookies)
@@ -324,23 +327,76 @@ def _combo_check_branch(combo: CombinationEntry, branch_acc: dict) -> tuple:
     return matched, unmatched, total, pct
 
 
+def _build_global_acc(
+    root: Optional["RequestNode"],
+    orphans: List["RequestNode"],
+) -> dict:
+    """
+    Build a single field-text accumulator that merges ALL nodes in the tree
+    and all orphans.  Used as a global fallback for combinations that span
+    multiple URL branches (e.g. SAML: the 302 redirect lives under one path
+    while the ACS POST lives under a completely different path — they are
+    never in the same root→node branch, so per-branch accumulation misses
+    keywords that appear across the two nodes).
+
+    Returns a dict keyed by _FIELD_LABELS keys.
+    """
+    acc: dict = {k: "" for k in _FIELD_LABELS}
+
+    def _collect(node: "RequestNode"):
+        f = _fields(node)
+        for k in acc:
+            acc[k] += "\n" + f[k]
+        for child in node.children:
+            _collect(child)
+
+    if root is not None:
+        _collect(root)
+    for orphan in orphans:
+        f = _fields(orphan)
+        for k in acc:
+            acc[k] += "\n" + f[k]
+
+    return acc
+
+
 def _match_combinations_in_tree(
     root: Optional[RequestNode],
     orphans: List[RequestNode],
     combinations: List[CombinationEntry],
 ) -> list:
     """
-    For every CombinationEntry, walk every branch (root→node) in the tree
-    and all orphan nodes, tracking the best (highest-%) match found.
+    For every CombinationEntry, evaluate in two passes:
+
+    Pass 1 — per-branch (root→node path accumulation):
+        A node "found" means ALL its keywords appeared somewhere along the
+        single path from root to that node.  This is the strictest match and
+        the most meaningful for flows that happen within one redirect chain.
+
+    Pass 2 — global (entire tree + orphans merged):
+        Auth flows such as SAML often span MULTIPLE independent URL branches:
+          • the 302 redirect (SAMLRequest in Location header) lives under one path,
+          • the ACS POST (NameID/StatusCode in body) lives under a different path.
+        Neither is an ancestor of the other, so per-branch accumulation will
+        never gather both signals simultaneously.  The global pass merges every
+        node's field text into one blob and checks the combination against it.
+        This can only upgrade a partial result to found — it never downgrades.
+
+    Result priority: per-branch full match > global full match > per-branch partial
+                     > global partial > not found.
 
     Returns a list of result dicts:
       {name, description, status, match_pct, total_keywords,
-       matched_keywords, unmatched_keywords, matching_branches}
+       matched_keywords, unmatched_keywords, matching_branches,
+       global_match (bool)}
     """
     if not combinations:
         return []
 
     _empty_acc = {k: "" for k in _FIELD_LABELS}
+
+    # Build the global accumulator once (shared across all combinations)
+    global_acc = _build_global_acc(root, orphans)
 
     results = []
 
@@ -358,6 +414,8 @@ def _match_combinations_in_tree(
         best_pct: int         = 0
         best_matched: list    = []
         best_unmatched: list  = []
+
+        # ── Pass 1: per-branch walk ───────────────────────────────────────────
 
         def _walk(node: RequestNode, acc: dict, path: list):
             nonlocal best_pct, best_matched, best_unmatched
@@ -408,6 +466,29 @@ def _match_combinations_in_tree(
                     best_matched   = matched
                     best_unmatched = unmatched
 
+        # ── Pass 2: global fallback (only if per-branch didn't already find 100%) ──
+        global_match_used = False
+        if not full_matches:
+            g_matched, g_unmatched, g_total, g_pct = _combo_check_branch(combo, global_acc)
+            if g_total > 0:
+                if g_pct == 100:
+                    # All keywords found somewhere across the whole tree
+                    full_matches.append({
+                        "branch_path":      [{"url": "(global — signals span multiple branches)", "method": "", "path": ""}],
+                        "deepest_node_id":  "",
+                        "deepest_url":      "(distributed across tree)",
+                        "deepest_method":   "",
+                        "deepest_path":     "",
+                        "matched_keywords": g_matched,
+                    })
+                    global_match_used = True
+                elif g_pct > best_pct:
+                    # Global is a better partial than any single branch
+                    best_pct       = g_pct
+                    best_matched   = g_matched
+                    best_unmatched = g_unmatched
+                    global_match_used = True
+
         if full_matches:
             results.append({
                 "name":               combo.name,
@@ -418,6 +499,7 @@ def _match_combinations_in_tree(
                 "matched_keywords":   full_matches[0]["matched_keywords"],
                 "unmatched_keywords": [],
                 "matching_branches":  full_matches[:5],
+                "global_match":       global_match_used,
             })
         elif best_pct > 0:
             results.append({
@@ -429,6 +511,7 @@ def _match_combinations_in_tree(
                 "matched_keywords":   best_matched,
                 "unmatched_keywords": best_unmatched,
                 "matching_branches":  [],
+                "global_match":       global_match_used,
             })
         else:
             results.append({
@@ -440,6 +523,7 @@ def _match_combinations_in_tree(
                 "matched_keywords":   [],
                 "unmatched_keywords": all_kw_labels,
                 "matching_branches":  [],
+                "global_match":       False,
             })
 
     return results
@@ -450,15 +534,33 @@ def _match_combinations_in_tree(
 _SATURATION_TOP_N = 5
 
 
-def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> dict:
+def _compute_overall_score(
+    cfg: CustomFilterConfig,
+    keyword_summary: dict,
+    combination_results: list,
+) -> dict:
     """
-    Weighted confidence score using saturation-threshold denominator.
-    denominator = sum of top-N keyword weights (default N=5) so that
-    finding the N strongest signals gives 100% confidence.
+    Combined confidence score that blends keyword signals and combination results.
+
+    Priority rules (from manager spec):
+    ─────────────────────────────────────
+    1. If ANY combination is 100% found → verdict = Confirmed (score = 100).
+    2. If combinations exist (even partial):
+         base_score = average of all combination match_pct values.
+         If keywords are also present and matched, add keyword contribution:
+           final = clamp(base + keyword_bonus, 0, 100)
+         where keyword_bonus = kw_score * 0.4  (keywords are secondary).
+    3. If only keywords, no combinations:
+         pure keyword weighted-saturation score (original logic).
+    4. If neither: score = 0.
+
+    Score → Verdict:
+      ≥ 70 → Confirmed | ≥ 40 → Likely | ≥ 15 → Possible | < 15 → Not detected
     """
+    # ── Keyword component ─────────────────────────────────────────────────────
     all_weights: list = []
-    earned:      int  = 0
-    evidence:    list = []
+    earned: int       = 0
+    evidence: list    = []
 
     for cat_name, entries in keyword_summary.items():
         for entry in entries:
@@ -473,30 +575,75 @@ def _compute_protocol_score(cfg: CustomFilterConfig, keyword_summary: dict) -> d
                     "hits":     len(entry["hits"]),
                 })
 
-    top_n_weights    = sorted(all_weights, reverse=True)[:_SATURATION_TOP_N]
-    saturation_point = sum(top_n_weights) or 1
-    total_weight     = sum(all_weights)
-    score            = min(100, round(earned / saturation_point * 100))
+    top_n          = sorted(all_weights, reverse=True)[:_SATURATION_TOP_N]
+    saturation     = sum(top_n) or 1
+    total_weight   = sum(all_weights)
+    kw_score       = min(100, round(earned / saturation * 100)) if all_weights else 0
+    has_keywords   = bool(all_weights)
+    evidence.sort(key=lambda x: x["weight"], reverse=True)
+
+    # ── Combination component ─────────────────────────────────────────────────
+    has_combos     = bool(combination_results)
+    any_full       = any(r.get("status") == "found" for r in combination_results)
+    combo_scores   = [r.get("match_pct", 0) for r in combination_results]
+    avg_combo      = round(sum(combo_scores) / len(combo_scores)) if combo_scores else 0
+
+    # Combination evidence for display
+    combo_evidence = [
+        {
+            "combo_name": r.get("name", ""),
+            "status":     r.get("status", "not_found"),
+            "match_pct":  r.get("match_pct", 0),
+        }
+        for r in combination_results
+    ]
+
+    # ── Final score calculation ───────────────────────────────────────────────
+    if any_full:
+        # Any complete combination → maximum confidence
+        final_score  = 100
+        score_basis  = "combination_found"
+    elif has_combos and has_keywords and earned > 0:
+        # Both combinations and keywords matched — blend (combos primary 60%, kw 40%)
+        keyword_bonus = kw_score * 0.4
+        final_score   = min(100, round(avg_combo * 0.6 + keyword_bonus))
+        score_basis   = "combined"
+    elif has_combos:
+        # Combinations present (with or without keyword config, or keywords present
+        # but none matched) — combination score is the entire score
+        final_score  = avg_combo
+        score_basis  = "combinations_only"
+    elif has_keywords:
+        # Only keywords, no combinations configured
+        final_score  = kw_score
+        score_basis  = "keywords_only"
+    else:
+        final_score  = 0
+        score_basis  = "none"
 
     verdict = (
-        "Confirmed"    if score >= 70 else
-        "Likely"       if score >= 40 else
-        "Possible"     if score >= 15 else
+        "Confirmed"    if final_score >= 70 else
+        "Likely"       if final_score >= 40 else
+        "Possible"     if final_score >= 15 else
         "Not detected"
     )
 
-    evidence.sort(key=lambda x: x["weight"], reverse=True)
-
     return {
         "protocol":         cfg.name,
-        "score":            score,
-        "earned":           earned,
-        "saturation_point": saturation_point,
-        "total_weight":     total_weight,
+        "score":            final_score,
         "verdict":          verdict,
+        "score_basis":      score_basis,
+        # Keyword fields (for display)
+        "earned":           earned,
+        "saturation_point": saturation,
+        "total_weight":     total_weight,
+        "kw_score":         kw_score,
         "evidence":         evidence,
+        # Combination fields (for display)
+        "avg_combo_score":  avg_combo,
+        "any_combo_found":  any_full,
+        "combo_evidence":   combo_evidence,
     }
-
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
@@ -564,7 +711,6 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
                     })
 
     keyword_summary    = _build_keyword_summary(cfg, match_info)
-    protocol_score     = _compute_protocol_score(cfg, keyword_summary)
 
     # ── Combination matching ── always runs on the FULL original tree
     # (not the filtered sub-tree) so combinations catch cross-branch signals
@@ -578,6 +724,8 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
     combination_results = _match_combinations_in_tree(
         full_root, full_orphans, cfg.combinations
     )
+
+    protocol_score = _compute_overall_score(cfg, keyword_summary, combination_results)
 
     return {
         "root_url":            payload.get("root_url", ""),

@@ -31,6 +31,7 @@ import base64
 import html as _html_mod
 import json as _json
 import re
+import zlib
 from typing import List
 from urllib.parse import parse_qsl, unquote
 
@@ -56,28 +57,46 @@ def _try_url(s: str) -> str:
 
 
 def _try_b64(s: str) -> str:
-    """Base64 or Base64URL decode.  Returns decoded UTF-8 text or ''."""
+    """
+    Base64 or Base64URL decode.  Returns decoded text or ''.
+
+    If decoded bytes are not valid UTF-8, tries zlib raw-inflate
+    (handles SAML Redirect Binding: Base64 of raw-deflated XML)
+    making this robust even when _try_saml_deflate is not called first.
+    """
     s = s.strip()
     if len(s) < 20:
         return ''
-    # Convert Base64URL to standard
     std = s.replace('-', '+').replace('_', '/')
     pad = len(std) % 4
     if pad:
         std += '=' * (4 - pad)
-    # Quick alphabet check before attempting decode
     if not _B64_RE.match(std):
         return ''
     try:
-        raw = base64.b64decode(std, validate=True)
-        return raw.decode('utf-8', errors='replace')
+        raw = base64.b64decode(std, validate=False)
     except Exception:
-        try:
-            raw = base64.b64decode(std, validate=False)
-            return raw.decode('utf-8', errors='replace')
-        except Exception:
-            return ''
-
+        return ''
+    # Try strict UTF-8 first
+    try:
+        return raw.decode('utf-8', errors='strict')
+    except UnicodeDecodeError:
+        pass
+    # Not valid UTF-8 — try raw inflate (SAML deflate)
+    try:
+        text = zlib.decompress(raw, -15).decode('utf-8', errors='replace')
+        if text.strip().startswith('<'):
+            return text
+    except Exception:
+        pass
+    try:
+        text = zlib.decompress(raw).decode('utf-8', errors='replace')
+        if text.strip().startswith('<'):
+            return text
+    except Exception:
+        pass
+    # Return with replacement chars (binary data)
+    return raw.decode('utf-8', errors='replace')
 
 def _try_jwt(s: str) -> str:
     """Decode JWT header+payload claims to a flat key=value string."""
@@ -132,7 +151,41 @@ def _try_hex(s: str) -> str:
         return ''
 
 
+def _try_saml_deflate(s: str) -> str:
+    """
+    Decode SAML Redirect Binding payload:
+      URL-decode → Base64-decode → raw-inflate (RFC 1951 deflate, no zlib header).
+    This is used by SAMLRequest in SAML HTTP Redirect Binding.
+    Returns decoded XML string or ''.
+    """
+    s = s.strip()
+    if len(s) < 20:
+        return ''
+    try:
+        # Step 1: URL-decode (%XX sequences)
+        url_dec = unquote(s)
+        # Step 2: Base64-decode (standard or URL-safe)
+        std = url_dec.replace('-', '+').replace('_', '/')
+        pad = len(std) % 4
+        if pad:
+            std += '=' * (4 - pad)
+        compressed = base64.b64decode(std, validate=False)
+        # Step 3: raw inflate (wbits=-15 = raw deflate, no zlib/gzip header)
+        xml = zlib.decompress(compressed, -15).decode('utf-8', errors='replace')
+        # Must look like XML to be valid
+        if xml.strip().startswith('<'):
+            return xml
+        return ''
+    except Exception:
+        return ''
+
+
 # ── Recursive value expander ───────────────────────────────────────────────────
+
+# Common header value prefixes to strip before decode attempts
+_VALUE_PREFIXES = ('Bearer ', 'bearer ', 'Basic ', 'basic ', 'Token ', 'token ',
+                   'OAuth ', 'oauth ', 'SAML ', 'saml ')
+
 
 def _expand_value(v: str, depth: int = 0) -> List[str]:
     """
@@ -157,7 +210,20 @@ def _expand_value(v: str, depth: int = 0) -> List[str]:
                     seen.add(sub)
                     results.append(sub)
 
-    # Try JWT first (has dots — would be misidentified by URL decoder)
+    # Strip common auth prefixes and try the bare token first
+    for prefix in _VALUE_PREFIXES:
+        if v.startswith(prefix):
+            bare = v[len(prefix):].strip()
+            if bare:
+                _add(_try_saml_deflate(bare))
+                _add(_try_jwt(bare))
+                _add(_try_b64(bare))
+            break
+
+    # Try SAML deflate first (URL+B64+rawDeflate — would be mangled by other decoders)
+    _add(_try_saml_deflate(v))
+
+    # Try JWT (has dots — would be misidentified by URL decoder)
     _add(_try_jwt(v))
 
     # URL decode (%XX only — preserves + as literal)
@@ -286,18 +352,70 @@ def expand_body(raw: str | None, parsed=None) -> str:
     return '\n'.join(deduped)
 
 
+def _extract_query_params(v: str) -> List[tuple]:
+    """
+    Extract (key, value) pairs from a string that contains URL query params.
+    Handles:
+      - Full URLs:  https://host/path?SAMLResponse=PFJl...&RelayState=abc
+      - Relative:   /path?key=val&key2=val2
+      - Bare pairs: SAMLResponse=PFJl...&RelayState=abc  (no scheme/path)
+    Returns list of (key, url-decoded-value) tuples, or [] if not applicable.
+    """
+    s = v.strip()
+    # Try to extract query string from full/relative URL
+    qs = ''
+    if '?' in s:
+        qs = s.split('?', 1)[1].split('#')[0]  # drop fragment
+    elif '=' in s and '&' in s and not s.startswith('{') and not s.startswith('<'):
+        qs = s  # bare key=value&key=value
+    if not qs:
+        return []
+    try:
+        pairs = parse_qsl(qs, keep_blank_values=True, strict_parsing=False)
+        return pairs if len(pairs) >= 1 else []
+    except Exception:
+        return []
+
+
 def expand_header_value(v: str) -> str:
     """
-    Expand a single header value.
+    Expand a single header value for keyword searching.
     Returns original + all decoded layers concatenated.
-    Only applied to values >= 16 chars to avoid noise.
+
+    Handles three patterns:
+      1. URL with query string — each query param value is decoded individually
+         (catches SAMLResponse= in Location headers, etc.)
+      2. Bare key=value&... — same treatment
+      3. Single encoded value — tries all decode layers on the whole value
     """
     if not v or len(v) < 16:
         return v
-    extra = _expand_value(v)
-    if not extra:
-        return v
-    return v + '\n' + '\n'.join(extra)
+
+    parts = [v]
+
+    # ── Pattern 1 & 2: URL query params or bare key=value pairs ──────────────
+    pairs = _extract_query_params(v)
+    if pairs:
+        for k, val in pairs:
+            parts.append(f"{k}={val}")   # URL-decoded pair
+            parts.append(val)            # bare value
+            for dec in _expand_value(val):
+                parts.append(f"{k}={dec}")
+                parts.append(dec)
+
+    # ── Pattern 3: whole-value expansion (JWT, Base64, SAML deflate, etc.) ───
+    for dec in _expand_value(v):
+        parts.append(dec)
+
+    # Deduplicate preserving order
+    seen: set = set()
+    deduped = []
+    for p in parts:
+        if p and p not in seen:
+            seen.add(p)
+            deduped.append(p)
+
+    return '\n'.join(deduped)
 
 
 def expand_headers(headers) -> str:

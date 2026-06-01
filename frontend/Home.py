@@ -107,13 +107,18 @@ def get_client() -> APIClient:
 # ── Protocol verdict renderer ─────────────────────────────────────────────────
 
 def _render_protocol_verdict(ps: dict):
-    verdict  = ps.get("verdict", "Not detected")
-    score    = ps.get("score", 0)
-    protocol = ps.get("protocol", "Protocol")
-    earned   = ps.get("earned", 0)
-    sat      = ps.get("saturation_point", 0)
-    total_w  = ps.get("total_weight", 0)
-    evidence = ps.get("evidence", [])
+    verdict       = ps.get("verdict", "Not detected")
+    score         = ps.get("score", 0)
+    protocol      = ps.get("protocol", "Protocol")
+    earned        = ps.get("earned", 0)
+    sat           = ps.get("saturation_point", 0)
+    total_w       = ps.get("total_weight", 0)
+    kw_score      = ps.get("kw_score", 0)
+    evidence      = ps.get("evidence", [])
+    score_basis   = ps.get("score_basis", "keywords_only")
+    avg_combo     = ps.get("avg_combo_score", 0)
+    any_full      = ps.get("any_combo_found", False)
+    combo_ev      = ps.get("combo_evidence", [])
 
     verdict_class = {
         "Confirmed":    "verdict-confirmed",
@@ -129,23 +134,49 @@ def _render_protocol_verdict(ps: dict):
         "Not detected": "❌",
     }.get(verdict, "❔")
 
+    # Build score breakdown subtitle
+    basis_map = {
+        "combination_found": "Combination fully matched → Confirmed",
+        "combined":          f"Combinations avg {avg_combo}% · Keywords {kw_score}/100 (blended)",
+        "combinations_only": f"Combinations avg {avg_combo}% (no keywords configured)",
+        "keywords_only":     f"Keywords: {earned}/{sat} pts (top-5 threshold)",
+        "none":              "No keywords or combinations configured",
+    }
+    basis_label = basis_map.get(score_basis, "")
+
+    # Top keyword signals
     top_ev = evidence[:3]
-    ev_chips = " &nbsp;".join(
-        f'<code style="background:#1c2128;border:1px solid #30363d;border-radius:4px;'
-        f'padding:1px 6px;font-size:11px;color:#e6edf3">'
-        f'{e["keyword"]} <span style="color:#d29922">w{e["weight"]}</span></code>'
-        for e in top_ev
-    )
-    matched_count = len(evidence)
+    ev_chips_parts = []
+    for e in top_ev:
+        ev_chips_parts.append(
+            f'<code style="background:#1c2128;border:1px solid #30363d;border-radius:4px;'
+            f'padding:1px 6px;font-size:11px;color:#e6edf3">'
+            f'{e["keyword"]} <span style="color:#d29922">w{e["weight"]}</span></code>'
+        )
+    ev_chips = " &nbsp;".join(ev_chips_parts)
+
+    # Combo pills
+    combo_pills = ""
+    if combo_ev:
+        pills = []
+        for ce in combo_ev[:4]:
+            pct  = ce["match_pct"]
+            col  = "#3fb950" if pct==100 else "#d29922" if pct>0 else "#8b949e"
+            pills.append(
+                f'<span style="background:#21262d;border:1px solid {col};border-radius:4px;'
+                f'padding:1px 8px;font-size:10px;color:{col};font-family:monospace;margin:2px">'
+                f'{ce["combo_name"][:20]} {pct}%</span>'
+            )
+        combo_pills = '<div style="margin-top:6px;flex-wrap:wrap;display:flex;gap:3px">' + "".join(pills) + '</div>'
 
     if top_ev:
-        top_signals_html = '<div style="margin-top:6px">Top signals: ' + ev_chips + '</div>'
+        top_signals_html = '<div style="margin-top:5px;font-size:11px;color:#8b949e">Top signals: ' + ev_chips + '</div>'
     else:
         top_signals_html = ""
 
     st.markdown(
         f'<div class="verdict-card {verdict_class}">'
-        f'  <div style="min-width:180px">'
+        f'  <div style="min-width:200px">'
         f'    <div style="font-size:11px;color:#8b949e;margin-bottom:2px;text-transform:uppercase;letter-spacing:.06em">Protocol Detection</div>'
         f'    <div style="font-size:14px;font-weight:700;color:#e6edf3">{protocol}</div>'
         f'  </div>'
@@ -157,9 +188,8 @@ def _render_protocol_verdict(ps: dict):
         f'    <div class="verdict-score-bar-wrap">'
         f'      <div class="verdict-score-bar" style="width:{score}%"></div>'
         f'    </div>'
-        f'    <div style="font-size:11px;color:#8b949e;margin-top:6px">'
-        f'      Confidence: {earned} pts earned · threshold {sat} pts (top-5 signals) · {total_w} pts total'
-        f'    </div>'
+        f'    <div style="font-size:11px;color:#8b949e;margin-top:5px">{basis_label}</div>'
+        f'    {combo_pills}'
         f'    {top_signals_html}'
         f'  </div>'
         f'</div>',
@@ -391,7 +421,6 @@ with st.sidebar:
     root_url = st.text_input(
         "Root URL",
         placeholder="https://app.example.com",
-        value="/",
         help="The page URL where you started recording the HAR",
     )
 

@@ -100,6 +100,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
 <style>
 :root {
   --bg:#0d1117; --surface:#161b22; --surface2:#1c2128; --border:#30363d;
@@ -603,12 +604,121 @@ function sec(title, content, open=false){
     <div class="sec-body${open?' open':''}">${content}</div>
   </div>`;
 }
+/* ── Header value parser ─────────────────────────────────────────────────── */
+function _parseHeaderValue(name, value){
+  /* Returns {type:'simple'|'url'|'params', url, params:[{k,v}], fragment}
+     type='url'    – value is a URL, possibly with query string
+     type='params' – value contains &-separated key=value pairs (no scheme)
+     type='simple' – plain value */
+  if(!value||value.length<8)return{type:'simple'};
+  const v=value.trim();
+
+  // Full URL (Location, Referer, etc.)
+  if(/^https?:\/\//i.test(v)||v.startsWith('/')){
+    try{
+      // Construct a URL — use dummy base for relative URLs
+      const base = v.startsWith('/') ? 'https://x' : undefined;
+      const u = new URL(base ? base+v : v);
+      const params=[...u.searchParams.entries()].map(([k,val])=>({k,v:val}));
+      if(params.length){
+        return{type:'url',origin:u.origin+(base?'':u.hostname),
+               path:u.pathname,fragment:u.hash,params};
+      }
+    }catch{}
+    return{type:'simple'};
+  }
+
+  // & separated key=value (no scheme) — e.g. SAMLRequest=...&RelayState=...
+  if(v.includes('=')&&v.includes('&')&&!/[\s<>\[\]{}"\'`]/.test(v)){
+    try{
+      const pairs=[...new URLSearchParams(v)];
+      if(pairs.length>=2) return{type:'params',params:pairs.map(([k,pv])=>({k,v:pv}))};
+    }catch{}
+  }
+
+  return{type:'simple'};
+}
+
+function _headerParamsTable(params, kws){
+  /* Render &-separated params as a sub-table with per-value decode. */
+  const rows=params.map(({k,v})=>_bodyValueRow(k,v,kws)).join('');
+  return `<table style="width:100%;border-collapse:collapse;margin-top:4px;font-family:var(--mono);font-size:11px">${rows}</table>`;
+}
+
 function hdrsTable(hs, kws=new Set()){
   if(!hs?.length) return '<p class="no-data">—</p>';
   return `<table class="kv">${hs.map(h=>{
-    const vEnc = (h.value||'').length>16 ? detectEncodings(h.value||'') : [];
-    const badges = vEnc.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return`<span class="enc-badge ${e.cls}">${e.badge}</span>`;}).join('');
-    return `<tr><td>${hesc(h.name,kws)}</td><td>${hesc(h.value,kws)}${badges}</td></tr>`;
+    const name  = h.name||'';
+    const value = h.value||'';
+    const parsed = _parseHeaderValue(name, value);
+
+    if(parsed.type==='url'||parsed.type==='params'){
+      // ── Expanded view: URL path + decoded params sub-table ────────────────
+      let topLine='';
+      if(parsed.type==='url'){
+        topLine=`<div style="margin-bottom:3px;word-break:break-all">`+
+          `<span style="color:#e6edf3">${hesc(parsed.path||'',kws)}</span>`+
+          (parsed.fragment?`<span style="color:var(--muted)">${hesc(parsed.fragment,kws)}</span>`:'')+
+          `</div>`;
+      }
+      const subTable=_headerParamsTable(parsed.params, kws);
+      // Also offer the full raw value as a toggle
+      const uid='hv'+Math.random().toString(36).slice(2);
+      return `<tr><td style="vertical-align:top;color:var(--muted);white-space:nowrap;padding-right:8px">`+
+        `${hesc(name,kws)}</td>`+
+        `<td>`+
+          topLine+subTable+
+          `<div style="margin-top:3px">`+
+            `<a href="#" style="font-size:9px;color:var(--muted)" `+
+            `onclick="event.preventDefault();var r=document.getElementById('${uid}');`+
+            `r.style.display=r.style.display==='none'?'block':'none';return false;">`+
+            `show raw</a>`+
+          `</div>`+
+          `<div id="${uid}" style="display:none;font-family:var(--mono);font-size:10px;`+
+          `color:var(--muted);word-break:break-all;margin-top:2px">${hesc(value,kws)}</div>`+
+        `</td></tr>`;
+    }
+
+    // ── Simple value: auto-decode if encoded, else plain ──────────────────
+    const autoDec = value.length>=16 ? _autoDecodeValue(value) : null;
+    if(autoDec){
+      const uid2='hs'+Math.random().toString(36).slice(2);
+      const decVal=autoDec.decoded;
+      const VMAX=300;
+      let decHtml;
+      if(decVal.length>VMAX){
+        decHtml=`<span id="${uid2}-s">${hesc(decVal.substring(0,VMAX),kws)}`+
+          `<span style="color:var(--muted)">…</span>`+
+          `<a href="#" style="color:var(--accent);font-size:9px;margin-left:3px" `+
+          `onclick="event.preventDefault();`+
+          `document.getElementById('${uid2}-s').style.display='none';`+
+          `document.getElementById('${uid2}-f').style.display='inline';return false;">more</a></span>`+
+          `<span id="${uid2}-f" style="display:none;white-space:pre-wrap">${hesc(decVal,kws)}</span>`;
+      } else {
+        decHtml=`<span style="white-space:pre-wrap">${hesc(decVal,kws)}</span>`;
+      }
+      return `<tr><td style="vertical-align:top;color:var(--muted);white-space:nowrap;padding-right:8px">`+
+        `${hesc(name,kws)}</td><td>`+
+        `<span style="font-size:9px;background:#21262d;border:1px solid var(--border);`+
+        `border-radius:3px;padding:0 5px;color:#58a6ff;margin-right:4px">${autoDec.method}</span>`+
+        `<a href="#" style="font-size:9px;color:var(--muted)" `+
+        `onclick="event.preventDefault();var r=document.getElementById('${uid2}-r');`+
+        `r.style.display=r.style.display==='none'?'block':'none';return false;">show raw</a>`+
+        `<div style="margin-top:2px">${decHtml}</div>`+
+        `<div id="${uid2}-r" style="display:none;font-family:var(--mono);font-size:10px;`+
+        `color:var(--muted);word-break:break-all;margin-top:2px">${hesc(value,kws)}</div>`+
+        `</td></tr>`;
+    }
+
+    // Plain value with encode badges
+    const vEnc = value.length>16 ? detectEncodings(value) : [];
+    const badges = vEnc.map(id=>{
+      const e=ENCODINGS.find(e=>e.id===id);if(!e)return'';
+      return`<span class="enc-badge ${e.cls}" style="cursor:pointer" data-val="${_attrEsc(value)}" `+
+        `onclick="event.stopPropagation();_decodeBodyValue(this,'${id}')">${e.badge}</span>`;
+    }).join('');
+    return `<tr><td style="vertical-align:top;color:var(--muted);white-space:nowrap;padding-right:8px">`+
+      `${hesc(name,kws)}</td><td style="word-break:break-all">${hesc(value,kws)}${badges}</td></tr>`;
   }).join('')}</table>`;
 }
 function cookieTable(cs, kws=new Set()){
@@ -627,6 +737,50 @@ function kvTableH(obj, kws=new Set()){
   }).join('')}</table>`;
 }
 /* ── Body value decode helper ─────────────────────────────────────────────── */
+function _autoDecodeValue(vStr){
+  /* Try to fully decode a value through all layers.
+     Returns {decoded:string, method:string, steps:[]} or null if no decoding possible.
+     Applies multi-layer: e.g. URL → B64 → XML, or SAML deflate → XML. */
+  if(!vStr||vStr.length<8)return null;
+  const priority=['saml_deflate','jwt','durl','url','b64','b64u','html','hex'];
+  const enc=detectEncodings(vStr);
+  // Check priority list first, then any remaining detected
+  const ordered=[...priority.filter(id=>enc.includes(id)),
+                 ...enc.filter(id=>!priority.includes(id))];
+  if(!ordered.length)return null;
+  for(const id of ordered){
+    const e=ENCODINGS.find(e=>e.id===id);
+    if(!e)continue;
+    const res=e.decode(vStr);
+    if(!res.ok||!res.val||res.val===vStr)continue;
+    let val=res.val;
+    let method=e.label;
+    const steps=[{method:e.label,val}];
+    // Chain: if decoded value is XML → pretty print; if still encoded → decode again
+    let chainCount=0;
+    while(chainCount<3){
+      chainCount++;
+      const inner=val.trim();
+      if(inner.startsWith('<')){
+        const xmlE=ENCODINGS.find(e=>e.id==='xml');
+        if(xmlE){const xr=xmlE.decode(val);if(xr.ok&&xr.val!==val){val=xr.val;method+=' → XML';steps.push({method:'XML Pretty Print',val});}}
+        break;
+      }
+      const further=detectEncodings(val);
+      if(!further.length)break;
+      // Pick next decode
+      const nextId=further.find(id=>id!=='params')||further[0];
+      const nextE=ENCODINGS.find(e=>e.id===nextId);
+      if(!nextE)break;
+      const nr=nextE.decode(val);
+      if(!nr.ok||!nr.val||nr.val===val)break;
+      val=nr.val;method+=` → ${nextE.label}`;steps.push({method:nextE.label,val});
+    }
+    return{decoded:val,method,steps,encodingId:id};
+  }
+  return null;
+}
+
 function _attrEsc(s){
   return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -640,40 +794,78 @@ function _decodeBodyValue(el, method){
 }
 
 function _bodyValueRow(k, v, kws){
-  /* For a single key:value pair, return an HTML row that shows the value and
-     any detected encodings as inline quick-decode links. */
-  const vStr = typeof v === 'string' ? v : JSON.stringify(v);
+  /* Renders one key:value row.
+     If the value is encoded: auto-decode all layers and show decoded content
+     as the primary display.  The original encoded value is hidden behind a
+     toggle.  Keyword highlights apply to the decoded content. */
+  const vStr   = typeof v==='string' ? v : JSON.stringify(v);
+  const autoDec = _autoDecodeValue(vStr);
+  const uid2   = 'bv'+Math.random().toString(36).slice(2);
+
+  // Badge strip (for further manual decode)
   const enc  = detectEncodings(vStr);
-  let badges = '';
-  if(enc.length){
-    badges = enc.map(id=>{
-      const e=ENCODINGS.find(e=>e.id===id);
-      if(!e)return'';
-      // Store raw value in data-val attribute (HTML-escaped) to avoid
-      // JSON.stringify quote-wrapping that breaks the decoder input.
-      return`<span class="enc-badge ${e.cls}" style="cursor:pointer" `+
-        `title="Click to decode ${e.label}" `+
-        `data-val="${_attrEsc(vStr)}" `+
-        `onclick="event.stopPropagation();_decodeBodyValue(this,'${id}')">`+
-        `${e.badge} ↗</span>`;
-    }).join('');
-  }
-  const kHtml = `<span style="color:#8b949e">${hesc(k,kws)}</span>`;
-  // Long values: show first 120 chars with expand toggle
-  const VMAX = 120;
-  let vHtml;
-  if(vStr.length > VMAX){
-    const uid2='bv'+Math.random().toString(36).slice(2);
-    vHtml=`<span id="${uid2}-short">${hesc(vStr.substring(0,VMAX),kws)}<span style="color:var(--muted)">…</span>`+
-      `<a href="#" style="color:var(--accent);font-size:10px;margin-left:4px" `+
-      `onclick="event.preventDefault();document.getElementById('${uid2}-short').style.display='none';`+
-      `document.getElementById('${uid2}-full').style.display='inline';return false;">show all</a></span>`+
-      `<span id="${uid2}-full" style="display:none">${hesc(vStr,kws)}</span>`;
+  const badges = enc.map(id=>{
+    const e=ENCODINGS.find(e=>e.id===id);if(!e)return'';
+    return`<span class="enc-badge ${e.cls}" style="cursor:pointer;font-size:9px" `+
+      `title="Decode with ${e.label}" data-val="${_attrEsc(vStr)}" `+
+      `onclick="event.stopPropagation();_decodeBodyValue(this,'${id}')">${e.badge}</span>`;
+  }).join('');
+
+  let mainHtml;
+  if(autoDec){
+    // ── Show decoded value as primary, original as toggle ──────────────────
+    const decVal = autoDec.decoded;
+    const VMAX=400;
+    let decDisplay;
+    if(decVal.length>VMAX){
+      decDisplay=`<span id="${uid2}-dshort">${hesc(decVal.substring(0,VMAX),kws)}`+
+        `<span style="color:var(--muted)">…</span>`+
+        `<a href="#" style="color:var(--accent);font-size:10px;margin-left:4px" `+
+        `onclick="event.preventDefault();`+
+        `document.getElementById('${uid2}-dshort').style.display='none';`+
+        `document.getElementById('${uid2}-dfull').style.display='block';return false;">show all</a></span>`+
+        `<span id="${uid2}-dfull" style="display:none;white-space:pre-wrap">${hesc(decVal,kws)}</span>`;
+    } else {
+      decDisplay = `<span style="white-space:pre-wrap">${hesc(decVal,kws)}</span>`;
+    }
+    mainHtml =
+      `<div style="margin-bottom:2px">`+
+        `<span style="font-size:9px;background:#21262d;border:1px solid var(--border);`+
+        `border-radius:3px;padding:0 5px;color:#58a6ff;font-family:var(--mono);margin-right:4px">`+
+        `${autoDec.method}</span>`+
+        `<a href="#" style="font-size:9px;color:var(--muted)" `+
+        `onclick="event.preventDefault();`+
+        `var o=document.getElementById('${uid2}-orig');`+
+        `o.style.display=o.style.display==='none'?'block':'none';return false;">`+
+        `show original</a>`+
+        `${badges?'<span style="margin-left:4px">'+badges+'</span>':''}`+
+      `</div>`+
+      `<div>${decDisplay}</div>`+
+      `<div id="${uid2}-orig" style="display:none;margin-top:4px;padding:4px;`+
+      `background:#0d1117;border:1px solid var(--border);border-radius:3px;`+
+      `font-size:10px;color:var(--muted);word-break:break-all">`+
+      `${hesc(vStr,new Set())}</div>`;
   } else {
-    vHtml = hesc(vStr,kws);
+    // ── No encoding detected — plain display ──────────────────────────────
+    const VMAX=200;
+    if(vStr.length>VMAX){
+      mainHtml=`<span id="${uid2}-short">${hesc(vStr.substring(0,VMAX),kws)}`+
+        `<span style="color:var(--muted)">…</span>`+
+        `<a href="#" style="color:var(--accent);font-size:10px;margin-left:4px" `+
+        `onclick="event.preventDefault();`+
+        `document.getElementById('${uid2}-short').style.display='none';`+
+        `document.getElementById('${uid2}-full').style.display='inline';return false;">show all</a></span>`+
+        `<span id="${uid2}-full" style="display:none">${hesc(vStr,kws)}</span>`+
+        (badges?`<span style="margin-left:6px">${badges}</span>`:'');
+    } else {
+      mainHtml=hesc(vStr,kws)+(badges?`<span style="margin-left:6px">${badges}</span>`:'');
+    }
   }
-  return `<tr><td style="color:#8b949e;white-space:nowrap;vertical-align:top;padding:3px 8px 3px 0;min-width:120px">${kHtml}</td>`+
-    `<td style="word-break:break-all;padding:3px 0;vertical-align:top">${vHtml}${badges?`<span style="margin-left:6px">${badges}</span>`:''}</td></tr>`;
+
+  return `<tr style="border-top:1px solid var(--border)">`+
+    `<td style="color:#8b949e;white-space:nowrap;vertical-align:top;padding:4px 10px 4px 0;min-width:130px;font-family:var(--mono);font-size:11px">${hesc(k,kws)}</td>`+
+    `<td style="word-break:break-all;padding:4px 0;vertical-align:top;font-family:var(--mono);font-size:11px">${mainHtml}</td>`+
+    `</tr>`;
 }
 
 function _flattenObj(obj, prefix, rows, kws, depth){
@@ -932,10 +1124,87 @@ const ENCODINGS=[
    decode:t=>{try{const p=t.trim().split('.');const d=s=>{s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return JSON.parse(atob(s))};return{ok:1,val:JSON.stringify({header:d(p[0]),payload:d(p[1])},null,2)+'\n\n[signature omitted]'}}catch(e){return{ok:0,val:''+e}}}},
   {id:'b64',  label:'Base64 Decode',      badge:'B64',   cls:'enc-b64',
    detect:t=>{const s=t.trim().replace(/\s/g,'');if(s.length<20||!/^[A-Za-z0-9+\/]+=*$/.test(s))return false;const hasTypicalB64=(s.includes('+')||s.includes('/')||s.includes('='));const padded=s.length%4===0||(s.length+1)%4===0||(s.length+2)%4===0;return padded&&(hasTypicalB64||s.length>=60);},
-   decode:t=>{try{const b=atob(t.trim().replace(/\s/g,''));try{const u=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(b,c=>c.charCodeAt(0)));try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}catch{return{ok:1,val:u}}}catch{return{ok:1,val:'[binary]\n'+[...b].map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ')}}}catch(e){return{ok:0,val:''+e}}}},
+   decode:t=>{
+     try{
+       const raw=t.trim().replace(/\s/g,'');
+       const b=atob(raw);
+       const bytes=Uint8Array.from(b,c=>c.charCodeAt(0));
+       // Try UTF-8 text first
+       try{
+         const u=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+         try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}
+         catch{return{ok:1,val:u}}
+       }catch{}
+       // Not valid UTF-8 — try raw inflate (SAML Redirect / zlib-deflated data)
+       if(typeof pako!=='undefined'){
+         try{
+           const xml=pako.inflateRaw(bytes,{to:'string'});
+           if(xml.trim().startsWith('<')){
+             // Pretty-print the XML
+             try{
+               const parser=new DOMParser();
+               const doc=parser.parseFromString(xml,'application/xml');
+               if(!doc.querySelector('parsererror')){
+                 const xs=new XMLSerializer();
+                 try{
+                   const xsltDoc=parser.parseFromString('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:strip-space elements="*"/><xsl:output method="xml" indent="yes"/><xsl:template match="node()|@*"><xsl:copy><xsl:apply-templates select="node()|@*"/></xsl:copy></xsl:template></xsl:stylesheet>','application/xml');
+                   const xp=new XSLTProcessor();xp.importStylesheet(xsltDoc);
+                   const out=xp.transformToDocument(doc);
+                   return{ok:1,val:xs.serializeToString(out).replace(/^<\?xml[^?]*\?>\s*/,'')};
+                 }catch{return{ok:1,val:xml};}
+               }
+             }catch{}
+             return{ok:1,val:xml};
+           }
+         }catch{}
+         // Also try zlib inflate (with header)
+         try{
+           const xml=pako.inflate(bytes,{to:'string'});
+           if(xml.trim().startsWith('<'))return{ok:1,val:xml};
+         }catch{}
+       }
+       // Fallback: hex dump
+       return{ok:1,val:'[binary — '+bytes.length+' bytes]\n'+
+         [...bytes].map(c=>c.toString(16).padStart(2,'0')).join(' ')};
+     }catch(e){return{ok:0,val:''+e}}
+   }},
   {id:'b64u', label:'Base64URL Decode',   badge:'B64U',  cls:'enc-b64',
    detect:t=>{const s=t.trim();if(s.length<20||!/^[A-Za-z0-9_-]+=*$/.test(s))return false;return(s.includes('-')||s.includes('_'))&&s.length>=40&&!s.includes('.')},
-   decode:t=>{try{let s=t.trim().replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const b=atob(s);try{const u=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(b,c=>c.charCodeAt(0)));try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}catch{return{ok:1,val:u}}}catch{return{ok:1,val:'[binary]\n'+[...b].map(c=>c.charCodeAt(0).toString(16).padStart(2,'0')).join(' ')}}}catch(e){return{ok:0,val:''+e}}}},
+   decode:t=>{
+     try{
+       let s=t.trim().replace(/-/g,'+').replace(/_/g,'/');
+       while(s.length%4)s+='=';
+       const b=atob(s);
+       const bytes=Uint8Array.from(b,c=>c.charCodeAt(0));
+       try{
+         const u=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+         try{return{ok:1,val:JSON.stringify(JSON.parse(u),null,2)}}
+         catch{return{ok:1,val:u}}
+       }catch{}
+       if(typeof pako!=='undefined'){
+         try{
+           const xml=pako.inflateRaw(bytes,{to:'string'});
+           if(xml.trim().startsWith('<')){
+             try{
+               const parser=new DOMParser();const doc=parser.parseFromString(xml,'application/xml');
+               if(!doc.querySelector('parsererror')){
+                 const xs=new XMLSerializer();
+                 try{
+                   const xsltDoc=parser.parseFromString('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:strip-space elements="*"/><xsl:output method="xml" indent="yes"/><xsl:template match="node()|@*"><xsl:copy><xsl:apply-templates select="node()|@*"/></xsl:copy></xsl:template></xsl:stylesheet>','application/xml');
+                   const xp=new XSLTProcessor();xp.importStylesheet(xsltDoc);
+                   const out=xp.transformToDocument(doc);
+                   return{ok:1,val:xs.serializeToString(out).replace(/^<\?xml[^?]*\?>\s*/,'')};
+                 }catch{return{ok:1,val:xml};}
+               }
+             }catch{}
+             return{ok:1,val:xml};
+           }
+         }catch{}
+       }
+       return{ok:1,val:'[binary — '+bytes.length+' bytes]\n'+
+         [...bytes].map(c=>c.toString(16).padStart(2,'0')).join(' ')};
+     }catch(e){return{ok:0,val:''+e}}
+   }},
   {id:'html', label:'HTML Entity Decode', badge:'HTML&', cls:'enc-html',
    detect:t=>/(&amp;|&lt;|&gt;|&quot;|&#\d+;|&[a-z]{2,6};)/.test(t),
    decode:t=>{try{const e=document.createElement('div');e.innerHTML=t;return{ok:1,val:e.textContent}}catch(e){return{ok:0,val:''+e}}}},
@@ -957,6 +1226,69 @@ const ENCODINGS=[
          const out=xp.transformToDocument(doc);
          return{ok:1,val:xs.serializeToString(out).replace(/^<\?xml[^?]*\?>\s*/,'')};
        }catch{return{ok:1,val:xs.serializeToString(doc)};}
+     }catch(e){return{ok:0,val:''+e};}
+   }},
+  {id:'saml_deflate',label:'SAML Deflate Decode',badge:'SAML↓',cls:'enc-b64',
+   detect:t=>{
+     /* SAML Redirect Binding: Base64 of raw-deflated XML, optionally URL-encoded.
+        Handles both URL-encoded and plain Base64 forms. */
+     if(typeof pako==='undefined'){
+       /* pako may not be loaded yet — do a lightweight heuristic:
+          if it looks like base64 (no XML chars, no JWT dots count) and
+          length is typical for a SAML token, flag it as possible saml_deflate */
+       const s=t.trim();
+       return s.length>100&&/^[A-Za-z0-9+/=%-]+$/.test(s)&&!s.startsWith('<')&&
+              (s.includes('+') || s.includes('/'))&&s.split('.').length!==3;
+     }
+     const s=t.trim();
+     if(s.length<20)return false;
+     /* Try both URL-decoded and raw forms */
+     const candidates=[s];
+     try{const u=decodeURIComponent(s);if(u!==s)candidates.push(u);}catch{}
+     for(const cand of candidates){
+       try{
+         let b=cand.replace(/-/g,'+').replace(/_/g,'/');
+         const pad=(4-b.length%4)%4;if(pad)b+='='.repeat(pad);
+         const bin=atob(b);
+         const bytes=new Uint8Array(bin.length);
+         for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+         const xml=pako.inflateRaw(bytes,{to:'string'});
+         if(xml.trim().startsWith('<'))return true;
+       }catch{}
+     }
+     return false;
+   },
+   decode:t=>{
+     try{
+       if(typeof pako==='undefined')return{ok:0,val:'pako library not loaded'};
+       /* Try URL-decoded form first, then plain */
+       let xml='';
+       const candidates=[t.trim()];
+       try{const u=decodeURIComponent(t.trim());if(u!==t.trim())candidates.unshift(u);}catch{}
+       for(const cand of candidates){
+         try{
+           let b=cand.replace(/-/g,'+').replace(/_/g,'/');
+           const pad=(4-b.length%4)%4;if(pad)b+='='.repeat(pad);
+           const bin=atob(b);
+           const bytes=new Uint8Array(bin.length);
+           for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+           const candidate_xml=pako.inflateRaw(bytes,{to:'string'});
+           if(candidate_xml.trim().startsWith('<')){xml=candidate_xml;break;}
+         }catch{}
+       }
+       if(!xml)return{ok:0,val:'Could not inflate — not a valid SAML Deflate payload'};
+       // Pretty-print the XML
+       const parser=new DOMParser();
+       const doc=parser.parseFromString(xml,'application/xml');
+       const err=doc.querySelector('parsererror');
+       if(err)return{ok:1,val:xml};  // return raw if parse fails
+       try{
+         const xs=new XMLSerializer();
+         const xsltDoc=parser.parseFromString('<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:strip-space elements="*"/><xsl:output method="xml" indent="yes"/><xsl:template match="node()|@*"><xsl:copy><xsl:apply-templates select="node()|@*"/></xsl:copy></xsl:template></xsl:stylesheet>','application/xml');
+         const xp=new XSLTProcessor();xp.importStylesheet(xsltDoc);
+         const out=xp.transformToDocument(doc);
+         return{ok:1,val:xs.serializeToString(out).replace(/^<\?xml[^?]*\?>\s*/,'')};
+       }catch{return{ok:1,val:xml};}
      }catch(e){return{ok:0,val:''+e};}
    }},
 ];
