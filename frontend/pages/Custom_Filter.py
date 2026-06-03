@@ -166,7 +166,7 @@ def _combo_kw_count(combo: dict) -> int:
 # Page starts here
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("# 🎯 Custom Filter")
+st.markdown("# 🎯 Custom Filter and Combination Search")
 
 if st.button("← Back to Tree"):
     st.switch_page("Home.py")
@@ -429,11 +429,11 @@ with a2:
 
 with a3:
     if apply_disabled:
-        st.button("✅ Apply Custom Filter", type="primary",
+        st.button("✅ Apply Custom Filter / Search", type="primary",
                   use_container_width=True, disabled=True)
         st.caption("⚠ Add at least one keyword or combination to enable Apply.")
     else:
-        if st.button("✅ Apply Custom Filter", type="primary",
+        if st.button("✅ Apply Custom Filter / Search", type="primary",
                      use_container_width=True):
             with st.spinner("Applying filter…"):
                 try:

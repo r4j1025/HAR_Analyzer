@@ -200,6 +200,18 @@ def _render_protocol_verdict(ps: dict):
 # ── Combination results renderer ──────────────────────────────────────────────
 
 def _render_combination_results(combination_results: list):
+    """
+    Render combination results summary cards above the tree.
+
+    The interactive keyword hit buttons (one per occurrence per node) live
+    inside the tree iframe's combo panel — rendered by renderComboPanel() in
+    tree_renderer.py using COMBO_INFO injected at render time.  Clicking any
+    button there calls jumpToNode() directly, opening the node and highlighting
+    all matched keywords.
+
+    This function shows only the status summary cards so the user can see the
+    overall verdict before scrolling to the tree.
+    """
     if not combination_results:
         return
 
@@ -223,24 +235,24 @@ def _render_combination_results(combination_results: list):
         pct         = result.get("match_pct", 0)
         matched_kws = result.get("matched_keywords", [])
         missing_kws = result.get("unmatched_keywords", [])
-        branches    = result.get("matching_branches", [])
         total_kws   = result.get("total_keywords", 0)
 
         if status == "found":
-            card_cls  = "combo-found"
-            bar_cls   = "combo-pct-bar-found"
-            icon      = "✅"
-            label     = "Found (100%)"
+            card_cls = "combo-found"
+            bar_cls  = "combo-pct-bar-found"
+            icon     = "✅"
+            label    = "Found (100%)"
         elif status == "partial":
-            card_cls  = "combo-partial"
-            bar_cls   = "combo-pct-bar-partial"
-            icon      = "⚡"
-            label     = f"Partial — {pct}%  ({len(matched_kws)}/{total_kws} keywords)"
+            card_cls = "combo-partial"
+            bar_cls  = "combo-pct-bar-partial"
+            icon     = "⚡"
+            distinct = len({m["keyword"].lower() for m in matched_kws})
+            label    = f"Partial — {pct}%  ({distinct}/{total_kws} keywords)"
         else:
-            card_cls  = "combo-none"
-            bar_cls   = "combo-pct-bar-none"
-            icon      = "❌"
-            label     = "Not Found"
+            card_cls = "combo-none"
+            bar_cls  = "combo-pct-bar-none"
+            icon     = "❌"
+            label    = "Not Found"
 
         expanded = status in ("found", "partial")
 
@@ -255,14 +267,21 @@ def _render_combination_results(combination_results: list):
                 unsafe_allow_html=True,
             )
 
-            # Keyword chips
+            # Keyword status chips (static — just show ✓/✗, no clicks needed here)
+            # The clickable occurrence buttons are in the combo panel inside the tree.
             kw_html = ""
+            seen = set()
             for kw in matched_kws:
-                kw_html += (
-                    f'<span class="combo-kw-found">✓ {kw["keyword"]}'
-                    f'<span style="opacity:.6;margin-left:4px;font-size:10px">'
-                    f'in {kw["field"]}</span></span>'
-                )
+                key = kw["keyword"].lower()
+                if key not in seen:
+                    seen.add(key)
+                    occ = sum(1 for m in matched_kws if m["keyword"].lower() == key)
+                    occ_note = f' <span style="opacity:.5;font-size:9px">×{occ}</span>' if occ > 1 else ""
+                    kw_html += (
+                        f'<span class="combo-kw-found">✓ {kw["keyword"]}{occ_note}'
+                        f'<span style="opacity:.6;margin-left:4px;font-size:10px">'
+                        f'in {kw["field"]}</span></span>'
+                    )
             for kw in missing_kws:
                 kw_html += (
                     f'<span class="combo-kw-missing">✗ {kw["keyword"]}'
@@ -271,41 +290,12 @@ def _render_combination_results(combination_results: list):
                 )
             if kw_html:
                 st.markdown(
-                    f'<div style="margin:8px 0;line-height:2">{kw_html}</div>',
+                    f'<div style="margin:8px 0;line-height:2.2">{kw_html}</div>',
                     unsafe_allow_html=True,
                 )
 
-            # Matching branch paths (for Found status)
-            if branches:
-                st.markdown(
-                    f"**{len(branches)} matching branch{'es' if len(branches)>1 else ''}:**"
-                )
-                for b in branches[:3]:
-                    path_nodes = b.get("branch_path", [])
-                    method_colors = {
-                        "GET":"#3fb950","POST":"#58a6ff","PUT":"#d29922",
-                        "DELETE":"#f85149","PATCH":"#bc8cff",
-                    }
-                    steps = []
-                    for p in path_nodes[-5:]:  # show last 5 hops
-                        mc = method_colors.get(p.get("method",""), "#8b949e")
-                        steps.append(
-                            f'<span style="color:{mc};font-weight:700">'
-                            f'{p.get("method","")}</span> '
-                            f'<span style="color:#e6edf3">{p.get("path","")}</span>'
-                        )
-                    path_html = ' <span style="color:#8b949e"> → </span> '.join(steps)
-                    if len(path_nodes) > 5:
-                        path_html = (
-                            f'<span style="color:#8b949e">…{len(path_nodes)-5} earlier</span>'
-                            f' <span style="color:#8b949e"> → </span> ' + path_html
-                        )
-                    st.markdown(
-                        f'<div class="combo-branch-path">{path_html}</div>',
-                        unsafe_allow_html=True,
-                    )
-                if len(branches) > 3:
-                    st.caption(f"… and {len(branches)-3} more branch(es)")
+            if status in ("found", "partial") and matched_kws:
+                st.caption("↓ Click keyword buttons in the 🔗 Combination Keywords panel below the tree to jump to each node")
 
 
 # ── Keyword summary renderer ──────────────────────────────────────────────────
@@ -514,7 +504,7 @@ with fc1:
 
 with fc2:
     custom_active = st.session_state.filter_mode == "custom"
-    if st.button("🎯 Custom Filter", use_container_width=True,
+    if st.button("🎯 Filter / Search", use_container_width=True,
                  type="primary" if custom_active else "secondary"):
         st.switch_page("pages/Custom_Filter.py")
 
@@ -571,6 +561,7 @@ tree_html = render_tree_html(
     display,
     filter_mode=mode,
     match_info=st.session_state.match_info,
+    combination_results=st.session_state.get("combination_results", []),
     height=800,
 )
 st.components.v1.html(tree_html, height=800, scrolling=False)

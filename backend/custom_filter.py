@@ -41,31 +41,62 @@ def _fields(node: RequestNode) -> dict:
     """
     Return searchable text per logical field.
 
-    Headers are ALWAYS re-expanded at query time by calling expand_headers()
-    directly — we never rely solely on headers_decoded stored at ingestion,
-    because the decoder may have been updated after the HAR was processed
-    (e.g. SAML deflate support added later).  The stored headers_decoded is
-    appended as extra text so nothing is lost.
+    Headers: header *names* and decoded *values* are both included so that
+    searching for e.g. "authorization" or "x-api-key" hits the header name
+    even when the value alone would not match.  expand_headers() is called
+    live so SAML/JWT in Location, Set-Cookie etc. are always decoded.
+    Stored headers_decoded is appended as extra coverage.
 
-    Bodies use body_decoded (pre-expanded at ingestion) with a live fallback.
+    Query params: both *keys* and *values* are included.  Every value is run
+    through _expand_value so SAMLRequest, JWT, base64 blobs in URL query
+    strings are decoded before matching.
+
+    Cookies: cookie names and values are included in the header fields so
+    that a keyword search on a cookie name hits the req_header / res_header
+    field as expected.
+
+    Bodies: use pre-decoded body_decoded (ingestion-time) with live fallback.
     """
-    # ── Headers: always expand live + merge stored decoded ───────────────────
-    req_hdrs_live   = expand_headers(node.request.headers)
-    res_hdrs_live   = expand_headers(node.response.headers)
-    # Append anything from the stored decoded that isn't already in live
+    from decoder import _expand_value  # local import avoids circular at module level
+
+    # ── Query params: keys + decoded values ───────────────────────────────────
+    qp_parts: list = []
+    for k, v in (node.request.query_params or {}).items():
+        sv = ", ".join(v) if isinstance(v, list) else str(v)
+        # Include the key itself so keyword "code" hits ?code=...
+        qp_parts.append(k)
+        qp_parts.append(f"{k}={sv}")
+        qp_parts.append(sv)
+        for dec in _expand_value(sv):
+            qp_parts.append(f"{k}={dec}")
+            qp_parts.append(dec)
+    qp_text = "\n".join(qp_parts)
+
+    # ── Headers (names + decoded values) ─────────────────────────────────────
+    # expand_headers() already emits "Name: value\nName: decoded_value" lines,
+    # but we also emit bare header names so a search for "authorization" (the
+    # name) always matches regardless of its value.
+    def _headers_with_names(headers) -> str:
+        name_lines = [h.name for h in headers]            # bare names
+        expanded   = expand_headers(headers)              # "Name: value\n..."
+        return "\n".join(name_lines) + "\n" + expanded
+
+    req_hdrs_live   = _headers_with_names(node.request.headers)
+    res_hdrs_live   = _headers_with_names(node.response.headers)
     req_hdrs_stored = node.request.headers_decoded or ""
     res_hdrs_stored = node.response.headers_decoded or ""
     req_hdrs = req_hdrs_live + ("\n" + req_hdrs_stored if req_hdrs_stored else "")
     res_hdrs = res_hdrs_live + ("\n" + res_hdrs_stored if res_hdrs_stored else "")
 
-    # ── Cookies ──────────────────────────────────────────────────────────────
-    req_cookie_text = " ".join(f"{c.name} {c.value}" for c in node.request.cookies)
-    res_cookie_text = " ".join(
+    # ── Cookies (names + values in header fields) ─────────────────────────────
+    req_cookie_text = "\n".join(
+        f"{c.name}\n{c.name}={c.value}\n{c.value}" for c in node.request.cookies
+    )
+    res_cookie_text = "\n".join(
         f"{h.value}" for h in node.response.headers if h.name.lower() == "set-cookie"
     )
 
-    # ── Bodies ───────────────────────────────────────────────────────────────
-    # Use pre-decoded if available; fall back to runtime expand_body.
+    # ── Bodies ────────────────────────────────────────────────────────────────
     req_body = (
         node.request.body_decoded
         or expand_body(node.request.body, node.request.body_parsed)
@@ -77,13 +108,32 @@ def _fields(node: RequestNode) -> dict:
         or ""
     )
 
+    # ── URL: raw URL + decoded query-param keys/values ────────────────────────
+    url_text = node.url + ("\n" + qp_text if qp_text else "")
+
+    # ── Composite field texts ─────────────────────────────────────────────────
+    req_header_text = "\n".join(filter(None, [req_hdrs, req_cookie_text]))
+    res_header_text = "\n".join(filter(None, [res_hdrs, res_cookie_text]))
+
+    # req_body also includes query-param keys/values so that per-field
+    # "Request Body" keyword searches still hit URL-encoded form params
+    req_body_text = "\n".join(filter(None, [req_body, qp_text]))
+
+    all_text = "\n".join(filter(None, [
+        url_text,
+        req_header_text,
+        res_header_text,
+        req_body_text,
+        res_body,
+    ]))
+
     return {
-        "url":        node.url,
-        "req_header": req_hdrs + "\n" + req_cookie_text,
-        "res_header": res_hdrs + "\n" + res_cookie_text,
-        "req_body":   req_body,
+        "url":        url_text,
+        "req_header": req_header_text,
+        "res_header": res_header_text,
+        "req_body":   req_body_text,
         "res_body":   res_body,
-        "all":        "\n".join([node.url, req_hdrs, res_hdrs, req_body, res_body]),
+        "all":        all_text,
     }
 
 
@@ -130,8 +180,21 @@ _COMBO_FIELD_MAP = [
 
 # ── Match helpers ─────────────────────────────────────────────────────────────
 
+_ALL_FIELD_KEYS_ORDERED = ["url", "req_header", "res_header", "req_body", "res_body"]
+
+
 def _get_matches(node: RequestNode, cfg: CustomFilterConfig) -> list:
-    """Return {keyword, field, actual} for every keyword hit on this node."""
+    """
+    Return {keyword, field, actual, configured_field} for every keyword hit
+    on this node.
+
+    Two-pass search per keyword:
+      Pass 1 — designated field (strict match).
+      Pass 2 — fallback across all other fields so that keywords configured
+                in the wrong field (e.g. SAMLRequest in res_header_keywords
+                but actually in the URL query params) are still matched and
+                attributed to the field where they were actually found.
+    """
     f = _fields(node)
     hits = []
     checks = [
@@ -141,21 +204,36 @@ def _get_matches(node: RequestNode, cfg: CustomFilterConfig) -> list:
         (cfg.req_body_keywords,   "req_body"),
         (cfg.res_body_keywords,   "res_body"),
     ]
+    # dedup key: (kw.lower(), configured_field) so the same keyword in two
+    # different config lists is treated independently
     seen = set()
-    for keywords, field in checks:
+    for keywords, configured_field in checks:
         for entry in keywords:
             kw = _kw_str(entry).strip()
             if not kw:
                 continue
-            key = (kw.lower(), field)
+            key = (kw.lower(), configured_field)
             if key in seen:
                 continue
-            if _ci_contains(f[field], kw):
-                seen.add(key)
+            seen.add(key)
+
+            # Pass 1: check the configured field
+            if _ci_contains(f[configured_field], kw):
+                actual_field = configured_field
+            else:
+                # Pass 2: fallback — find which field actually has it
+                actual_field = None
+                for fk in _ALL_FIELD_KEYS_ORDERED:
+                    if fk != configured_field and _ci_contains(f[fk], kw):
+                        actual_field = fk
+                        break
+
+            if actual_field is not None:
                 hits.append({
-                    "keyword": kw,
-                    "field":   _FIELD_LABELS[field],
-                    "actual":  _extract_context(f[field], kw),
+                    "keyword":          kw,
+                    "field":            _FIELD_LABELS[actual_field],
+                    "configured_field": _FIELD_LABELS[configured_field],
+                    "actual":           _extract_context(f[actual_field], kw),
                 })
     return hits
 
@@ -166,6 +244,21 @@ def _matches_any_field(node: RequestNode, cfg: CustomFilterConfig) -> bool:
 
 # ── any_field strategy ─────────────────────────────────────────────────────────
 
+def _collect_all_descendants(node: RequestNode, match_info: list, reason: str = "ancestor_matched"):
+    """Record every node in a subtree into match_info (preserved because an ancestor matched)."""
+    match_info.append({
+        "node_id":          node.id,
+        "url":              node.url,
+        "path":             node.path,
+        "method":           node.method,
+        "status":           node.status,
+        "matches":          [],
+        "preserved_reason": reason,
+    })
+    for child in node.children:
+        _collect_all_descendants(child, match_info, "ancestor_matched")
+
+
 def _filter_any_field(
     node: RequestNode,
     cfg: CustomFilterConfig,
@@ -173,6 +266,7 @@ def _filter_any_field(
 ) -> Optional[RequestNode]:
     hits = _get_matches(node, cfg)
     if hits:
+        # This node matches — record it, then preserve ALL descendants unchanged.
         match_info.append({
             "node_id": node.id,
             "url":     node.url,
@@ -181,8 +275,12 @@ def _filter_any_field(
             "status":  node.status,
             "matches": hits,
         })
+        for child in node.children:
+            _collect_all_descendants(child, match_info, "ancestor_matched")
+        # Return node with its full original subtree intact.
         return node
 
+    # No match on this node — recurse into children.
     filtered_children: List[RequestNode] = []
     for child in node.children:
         result = _filter_any_field(child, cfg, match_info)
@@ -282,10 +380,11 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
                 continue
             weight = _kw_weight(raw_entry)
             all_hits = kw_to_hits.get(kw.lower(), [])
-            if field_filter is not None:
-                relevant_hits = [h for h in all_hits if h["field"] == field_filter]
-            else:
-                relevant_hits = all_hits
+            # Accept hits from any field: a keyword found via fallback in a
+            # different field than configured still counts as matched.
+            # field_filter is kept for AND-keyword-list mode (field_filter=None)
+            # but for per-field keyword lists we accept any field match.
+            relevant_hits = all_hits
 
             entries.append({
                 "keyword": kw,
@@ -302,62 +401,17 @@ def _build_keyword_summary(cfg: CustomFilterConfig, match_info: list) -> dict:
 
 # ── Combination matching ───────────────────────────────────────────────────────
 
-def _combo_check_branch(combo: CombinationEntry, branch_acc: dict) -> tuple:
-    """
-    Check a combination against accumulated branch field texts.
-    Returns (matched_list, unmatched_list, total_count, pct).
-    """
-    matched   = []
-    unmatched = []
-
-    for cfg_field, field_key in _COMBO_FIELD_MAP:
-        kw_list = getattr(combo, cfg_field, [])
-        for kw_entry in kw_list:
-            kw = kw_entry.strip() if isinstance(kw_entry, str) else str(kw_entry).strip()
-            if not kw:
-                continue
-            label = _FIELD_LABELS[field_key]
-            if _ci_contains(branch_acc[field_key], kw):
-                matched.append({"keyword": kw, "field": label})
-            else:
-                unmatched.append({"keyword": kw, "field": label})
-
-    total = len(matched) + len(unmatched)
-    pct   = round(len(matched) / total * 100) if total > 0 else 0
-    return matched, unmatched, total, pct
-
-
-def _build_global_acc(
-    root: Optional["RequestNode"],
-    orphans: List["RequestNode"],
-) -> dict:
-    """
-    Build a single field-text accumulator that merges ALL nodes in the tree
-    and all orphans.  Used as a global fallback for combinations that span
-    multiple URL branches (e.g. SAML: the 302 redirect lives under one path
-    while the ACS POST lives under a completely different path — they are
-    never in the same root→node branch, so per-branch accumulation misses
-    keywords that appear across the two nodes).
-
-    Returns a dict keyed by _FIELD_LABELS keys.
-    """
-    acc: dict = {k: "" for k in _FIELD_LABELS}
-
-    def _collect(node: "RequestNode"):
-        f = _fields(node)
-        for k in acc:
-            acc[k] += "\n" + f[k]
-        for child in node.children:
-            _collect(child)
-
-    if root is not None:
-        _collect(root)
-    for orphan in orphans:
-        f = _fields(orphan)
-        for k in acc:
-            acc[k] += "\n" + f[k]
-
-    return acc
+def _all_nodes(root: Optional[RequestNode], orphans: List[RequestNode]) -> List[RequestNode]:
+    """Flat list of every node in the tree + orphans."""
+    out: List[RequestNode] = []
+    def _walk(n: RequestNode):
+        out.append(n)
+        for ch in n.children:
+            _walk(ch)
+    if root:
+        _walk(root)
+    out.extend(orphans)
+    return out
 
 
 def _match_combinations_in_tree(
@@ -366,154 +420,149 @@ def _match_combinations_in_tree(
     combinations: List[CombinationEntry],
 ) -> list:
     """
-    For every CombinationEntry, evaluate in two passes:
+    For every CombinationEntry evaluate which keywords were found and in
+    which nodes, then return rich per-keyword occurrence data.
 
-    Pass 1 — per-branch (root→node path accumulation):
-        A node "found" means ALL its keywords appeared somewhere along the
-        single path from root to that node.  This is the strictest match and
-        the most meaningful for flows that happen within one redirect chain.
+    Strategy
+    ────────
+    1. Walk every node in the tree (including orphans) and record, for each
+       (keyword, field_key) pair, ALL nodes where it appears — not just the
+       first.  If "success" appears in 3 nodes we produce 3 occurrences.
+    2. A keyword is "matched" if at least one occurrence exists.
+    3. matched_keywords is a flat list of occurrences:
+         {keyword, field, node_id, node_url, node_method, node_path}
+       — one entry per occurrence so the UI can render a separate clickable
+       chip for each node.
+    4. If ALL configured keywords are matched (across any combination of
+       nodes) → status="found" (global cross-branch match).
+    5. Otherwise → partial or not_found as before.
 
-    Pass 2 — global (entire tree + orphans merged):
-        Auth flows such as SAML often span MULTIPLE independent URL branches:
-          • the 302 redirect (SAMLRequest in Location header) lives under one path,
-          • the ACS POST (NameID/StatusCode in body) lives under a different path.
-        Neither is an ancestor of the other, so per-branch accumulation will
-        never gather both signals simultaneously.  The global pass merges every
-        node's field text into one blob and checks the combination against it.
-        This can only upgrade a partial result to found — it never downgrades.
-
-    Result priority: per-branch full match > global full match > per-branch partial
-                     > global partial > not found.
-
-    Returns a list of result dicts:
-      {name, description, status, match_pct, total_keywords,
-       matched_keywords, unmatched_keywords, matching_branches,
-       global_match (bool)}
+    All text is sourced from _fields() which decodes headers, query params,
+    and bodies before matching — keywords always hit decoded content.
     """
     if not combinations:
         return []
 
-    _empty_acc = {k: "" for k in _FIELD_LABELS}
-
-    # Build the global accumulator once (shared across all combinations)
-    global_acc = _build_global_acc(root, orphans)
+    all_nodes = _all_nodes(root, orphans)
 
     results = []
 
     for combo in combinations:
-        # Collect all keywords for display
-        all_kw_labels = []
+        # Collect the (cfg_field, field_key, keyword) triples we need to check
+        kw_checks: list = []
         for cfg_field, field_key in _COMBO_FIELD_MAP:
             for kw_entry in getattr(combo, cfg_field, []):
                 kw = kw_entry.strip() if isinstance(kw_entry, str) else str(kw_entry).strip()
                 if kw:
-                    all_kw_labels.append({"keyword": kw, "field": _FIELD_LABELS[field_key]})
-        total_kws = len(all_kw_labels)
+                    kw_checks.append((cfg_field, field_key, kw))
+        total_kws = len(kw_checks)
+        if total_kws == 0:
+            continue
 
-        full_matches: list    = []
-        best_pct: int         = 0
-        best_matched: list    = []
-        best_unmatched: list  = []
+        # For each (cfg_field, field_key, keyword) find ALL nodes that contain it.
+        #
+        # Search strategy — two-pass per keyword:
+        #   Pass 1: look in the configured field_key (strict match).
+        #   Pass 2: if not found in the designated field, search the "all" field
+        #           as a fallback so that mis-filed keywords (e.g. SAMLRequest
+        #           placed in res_header_keywords but actually present in the URL
+        #           query params) are still matched and reported with the field
+        #           where they were actually found.
+        #
+        # The occurrence key is (cfg_field, kw.lower()) — anchored to the
+        # combination config field — so one keyword entry counts once even if
+        # it appears in multiple actual fields.
+        #
+        # key: (cfg_field, kw.lower()) → list of node-occurrence dicts
+        occurrences: dict = {}
+        node_fields_cache: dict = {}  # node_id → _fields() result
 
-        # ── Pass 1: per-branch walk ───────────────────────────────────────────
+        # All logical field keys in priority order for fallback reporting
+        _ALL_FIELD_KEYS = ["url", "req_header", "res_header", "req_body", "res_body"]
 
-        def _walk(node: RequestNode, acc: dict, path: list):
-            nonlocal best_pct, best_matched, best_unmatched
+        for node in all_nodes:
+            if node.id not in node_fields_cache:
+                node_fields_cache[node.id] = _fields(node)
+            f = node_fields_cache[node.id]
+            for _cfg_field, field_key, kw in kw_checks:
+                occ_key = (_cfg_field, kw.lower())
 
-            f       = _fields(node)
-            new_acc = {k: acc[k] + "\n" + f[k] for k in acc}
-            new_path = path + [{"url": node.url, "method": node.method, "path": node.path}]
+                # Pass 1: check the designated field
+                if _ci_contains(f[field_key], kw):
+                    actual_field_label = _FIELD_LABELS[field_key]
+                else:
+                    # Pass 2: fallback — search every other field
+                    actual_field_label = None
+                    for fk in _ALL_FIELD_KEYS:
+                        if fk != field_key and _ci_contains(f[fk], kw):
+                            actual_field_label = _FIELD_LABELS[fk]
+                            break
 
-            matched, unmatched, total, pct = _combo_check_branch(combo, new_acc)
-
-            if total > 0:
-                if pct == 100:
-                    full_matches.append({
-                        "branch_path":      new_path,
-                        "deepest_node_id":  node.id,
-                        "deepest_url":      node.url,
-                        "deepest_method":   node.method,
-                        "deepest_path":     node.path,
-                        "matched_keywords": matched,
+                if actual_field_label is not None:
+                    if occ_key not in occurrences:
+                        occurrences[occ_key] = []
+                    occurrences[occ_key].append({
+                        "keyword":         kw,
+                        "field":           actual_field_label,
+                        "configured_field": _FIELD_LABELS[field_key],
+                        "node_id":         node.id,
+                        "node_url":        node.url,
+                        "node_method":     node.method,
+                        "node_path":       node.path,
                     })
-                elif pct > best_pct:
-                    best_pct       = pct
-                    best_matched   = matched
-                    best_unmatched = unmatched
 
-            for child in node.children:
-                _walk(child, new_acc, new_path)
+        # Build matched/unmatched lists
+        matched_kws:   list = []
+        unmatched_kws: list = []
+        seen_unmatched: set = set()  # (cfg_field, kw.lower())
 
-        if root is not None:
-            _walk(root, dict(_empty_acc), [])
-
-        for orphan in orphans:
-            f   = _fields(orphan)
-            acc = {k: f[k] for k in _empty_acc}
-            matched, unmatched, total, pct = _combo_check_branch(combo, acc)
-            if total > 0:
-                if pct == 100:
-                    full_matches.append({
-                        "branch_path":      [{"url": orphan.url, "method": orphan.method, "path": orphan.path}],
-                        "deepest_node_id":  orphan.id,
-                        "deepest_url":      orphan.url,
-                        "deepest_method":   orphan.method,
-                        "deepest_path":     orphan.path,
-                        "matched_keywords": matched,
+        for _cfg_field, field_key, kw in kw_checks:
+            occ_key = (_cfg_field, kw.lower())
+            occ = occurrences.get(occ_key, [])
+            if occ:
+                matched_kws.extend(occ)  # one entry per occurrence node
+            else:
+                if occ_key not in seen_unmatched:
+                    seen_unmatched.add(occ_key)
+                    unmatched_kws.append({
+                        "keyword": kw,
+                        "field":   _FIELD_LABELS[field_key],
                     })
-                elif pct > best_pct:
-                    best_pct       = pct
-                    best_matched   = matched
-                    best_unmatched = unmatched
 
-        # ── Pass 2: global fallback (only if per-branch didn't already find 100%) ──
-        global_match_used = False
-        if not full_matches:
-            g_matched, g_unmatched, g_total, g_pct = _combo_check_branch(combo, global_acc)
-            if g_total > 0:
-                if g_pct == 100:
-                    # All keywords found somewhere across the whole tree
-                    full_matches.append({
-                        "branch_path":      [{"url": "(global — signals span multiple branches)", "method": "", "path": ""}],
-                        "deepest_node_id":  "",
-                        "deepest_url":      "(distributed across tree)",
-                        "deepest_method":   "",
-                        "deepest_path":     "",
-                        "matched_keywords": g_matched,
-                    })
-                    global_match_used = True
-                elif g_pct > best_pct:
-                    # Global is a better partial than any single branch
-                    best_pct       = g_pct
-                    best_matched   = g_matched
-                    best_unmatched = g_unmatched
-                    global_match_used = True
+        # Count distinct keywords that were found (not occurrences)
+        found_distinct = len({(_cf, kw.lower()) for _cf, _fk, kw in kw_checks
+                              if (_cf, kw.lower()) in occurrences})
+        pct = round(found_distinct / total_kws * 100) if total_kws else 0
 
-        if full_matches:
+        if pct == 100:
             results.append({
                 "name":               combo.name,
                 "description":        combo.description or "",
                 "status":             "found",
                 "match_pct":          100,
                 "total_keywords":     total_kws,
-                "matched_keywords":   full_matches[0]["matched_keywords"],
+                "matched_keywords":   matched_kws,
                 "unmatched_keywords": [],
-                "matching_branches":  full_matches[:5],
-                "global_match":       global_match_used,
+                "matching_branches":  [],
+                "global_match":       True,
             })
-        elif best_pct > 0:
+        elif pct > 0:
             results.append({
                 "name":               combo.name,
                 "description":        combo.description or "",
                 "status":             "partial",
-                "match_pct":          best_pct,
+                "match_pct":          pct,
                 "total_keywords":     total_kws,
-                "matched_keywords":   best_matched,
-                "unmatched_keywords": best_unmatched,
+                "matched_keywords":   matched_kws,
+                "unmatched_keywords": unmatched_kws,
                 "matching_branches":  [],
-                "global_match":       global_match_used,
+                "global_match":       False,
             })
         else:
+            all_kw_labels = [
+                {"keyword": kw, "field": _FIELD_LABELS[fk]}
+                for _cf, fk, kw in kw_checks
+            ]
             results.append({
                 "name":               combo.name,
                 "description":        combo.description or "",
@@ -712,17 +761,12 @@ def filter_custom_tree(payload: dict, cfg: CustomFilterConfig) -> dict:
 
     keyword_summary    = _build_keyword_summary(cfg, match_info)
 
-    # ── Combination matching ── always runs on the FULL original tree
-    # (not the filtered sub-tree) so combinations catch cross-branch signals
-    full_root:    Optional[RequestNode] = None
-    full_orphans: List[RequestNode]     = []
-    if tree_dict:
-        full_root = RequestNode.model_validate(tree_dict)
-    for od in orphan_dicts:
-        full_orphans.append(RequestNode.model_validate(od))
-
+    # ── Combination matching ── runs on the FILTERED tree/orphans so that
+    # combinations only inspect nodes that survived keyword filtering.
+    # When no keyword filter is configured (filtered_root == full root),
+    # this is equivalent to running on the full tree.
     combination_results = _match_combinations_in_tree(
-        full_root, full_orphans, cfg.combinations
+        filtered_root, filtered_orphans, cfg.combinations
     )
 
     protocol_score = _compute_overall_score(cfg, keyword_summary, combination_results)

@@ -31,6 +31,7 @@ def render_tree_html(
     tree_data: dict,
     filter_mode: str = "none",
     match_info: list = None,
+    combination_results: list = None,
     height: int = 800,
 ) -> str:
     safe_data = _truncate_bodies(copy.deepcopy(tree_data))
@@ -49,12 +50,76 @@ def render_tree_html(
         .replace("<!--",       r"<\!--")
     )
 
+    # Build COMBO_INFO: flat list of clickable hit entries for the combo panel.
+    # Each entry: {combo_name, keyword, field, node_id, node_method, node_path,
+    #              node_url, found}
+    # matched_keywords entries now carry node_id/node_method/node_path per occurrence.
+    combo_hits = []
+    for cr in (combination_results or []):
+        cname  = cr.get("name", "Combo")
+        status = cr.get("status", "not_found")
+        # matched keywords — one entry per node occurrence
+        for m in cr.get("matched_keywords", []):
+            combo_hits.append({
+                "combo_name":  cname,
+                "combo_status": status,
+                "keyword":     m.get("keyword", ""),
+                "field":       m.get("field", ""),
+                "node_id":     m.get("node_id", ""),
+                "node_method": m.get("node_method", ""),
+                "node_path":   m.get("node_path", ""),
+                "node_url":    m.get("node_url", ""),
+                "found":       True,
+            })
+        # missing keywords — no node, shown greyed out
+        for m in cr.get("unmatched_keywords", []):
+            combo_hits.append({
+                "combo_name":  cname,
+                "combo_status": status,
+                "keyword":     m.get("keyword", ""),
+                "field":       m.get("field", ""),
+                "node_id":     "",
+                "node_method": "",
+                "node_path":   "",
+                "node_url":    "",
+                "found":       False,
+            })
+
+    ci_json = json.dumps(combo_hits, ensure_ascii=False)
+    safe_ci = (
+        ci_json
+        .replace("</script>", r"<\/script>")
+        .replace("<!--",       r"<\!--")
+    )
+
+    # Also build nodeMatchKws entries for combo nodes so highlight works
+    # when jumpToNode is called: all matched keywords per node_id
+    combo_kws_by_node: dict = {}
+    for cr in (combination_results or []):
+        for m in cr.get("matched_keywords", []):
+            nid = m.get("node_id", "")
+            kw  = m.get("keyword", "")
+            if nid and kw:
+                combo_kws_by_node.setdefault(nid, set()).add(kw.lower())
+    # Serialize as {node_id: [kw, kw, ...]}
+    combo_kws_json = json.dumps(
+        {k: list(v) for k, v in combo_kws_by_node.items()},
+        ensure_ascii=False,
+    )
+    safe_combo_kws = (
+        combo_kws_json
+        .replace("</script>", r"<\/script>")
+        .replace("<!--",       r"<\!--")
+    )
+
     filter_mode_json = json.dumps(filter_mode)
     height_inner = height - 4  # tiny buffer
 
     html = _TEMPLATE.replace("__TREE_DATA__", safe_json)
     html = html.replace("__FILTER_MODE__", filter_mode_json)
     html = html.replace("__MATCH_INFO__", safe_mi)
+    html = html.replace("__COMBO_INFO__", safe_ci)
+    html = html.replace("__COMBO_KWS__",  safe_combo_kws)
     html = html.replace("__HEIGHT__", str(height_inner))
     return html
 
@@ -303,6 +368,44 @@ mark.kw-hl{
   color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 2px}
 .decode-close:hover{color:var(--text)}
 
+/* ── Combo panel ── */
+.combo-panel{
+  flex-shrink:0;background:var(--surface);border-top:1px solid var(--border);
+  max-height:180px;overflow:hidden;display:flex;flex-direction:column;
+}
+.combo-panel.hidden{display:none}
+.combo-header{
+  display:flex;align-items:center;gap:8px;padding:5px 12px;
+  background:var(--surface2);border-bottom:1px solid var(--border);
+  font-size:11px;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--custom);flex-shrink:0;cursor:pointer;
+  user-select:none;
+}
+.combo-header .mc{color:var(--muted);font-weight:400;margin-left:4px}
+.combo-header .chev{margin-left:auto;color:var(--muted)}
+.combo-body{overflow-x:auto;overflow-y:auto;padding:7px 12px;flex:1;display:flex;flex-wrap:wrap;gap:5px;align-content:flex-start}
+.combo-body::-webkit-scrollbar{height:4px;width:4px}
+.combo-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.combo-body.collapsed{display:none}
+/* combo keyword hit button — same shape as mkw-btn, purple accent */
+.ckw-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  background:var(--surface2);border:1px solid var(--border);border-radius:14px;
+  color:var(--text);cursor:pointer;font-family:var(--mono);font-size:11px;
+  padding:3px 10px;transition:background .12s,border-color .12s;white-space:nowrap;
+  max-width:320px;overflow:hidden;text-overflow:ellipsis;
+}
+.ckw-btn:hover{background:rgba(188,140,255,.15);border-color:var(--custom);color:var(--custom)}
+.ckw-btn.active{background:rgba(188,140,255,.2);border-color:var(--custom);color:var(--custom)}
+.ckw-btn.missing{cursor:default;opacity:.45}
+.ckw-btn.missing:hover{background:var(--surface2);border-color:var(--border);color:var(--text)}
+.ckw-kw{color:var(--custom);font-weight:700}
+.ckw-kw-miss{color:var(--muted);font-weight:700}
+.ckw-field{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em}
+.ckw-path{color:var(--muted);font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:160px;white-space:nowrap}
+.ckw-sep{display:block;width:100%;font-size:9px;color:var(--muted);padding:3px 2px 1px;
+  letter-spacing:.06em;text-transform:uppercase;font-weight:700;border-top:1px solid var(--border);margin-top:3px}
+
 /* ── Decode result panel ── */
 .decode-result-panel{position:fixed;z-index:9998;background:var(--surface);
   border:1px solid var(--border);border-radius:8px;padding:10px 12px;
@@ -352,7 +455,7 @@ mark.kw-hl{
     </div>
   </div>
 
-  <!-- match panel -->
+  <!-- match panel (keyword filter hits) -->
   <div class="match-panel hidden" id="matchPanel">
     <div class="match-header" id="matchHeader" onclick="toggleMatchBody()">
       <span>🔑 Matched Keywords</span>
@@ -361,6 +464,16 @@ mark.kw-hl{
     </div>
     <div class="match-body" id="matchBody"></div>
   </div>
+
+  <!-- combo panel (combination result hits) -->
+  <div class="combo-panel hidden" id="comboPanel">
+    <div class="combo-header" id="comboHeader" onclick="toggleComboBody()">
+      <span>🔗 Combination Keywords</span>
+      <span class="mc" id="comboCount"></span>
+      <span class="chev" id="comboChev">▾</span>
+    </div>
+    <div class="combo-body" id="comboBody"></div>
+  </div>
 </div>
 
 <script>
@@ -368,6 +481,8 @@ mark.kw-hl{
 const DATA        = __TREE_DATA__;
 const FILTER_MODE = __FILTER_MODE__;
 const MATCH_INFO  = __MATCH_INFO__;
+const COMBO_INFO  = __COMBO_INFO__;   /* flat list of combo hit entries */
+const COMBO_KWS   = __COMBO_KWS__;   /* {node_id: [kw,...]} for combo hits */
 
 let activeNode    = null;
 let activeNodeId  = null;
@@ -383,6 +498,11 @@ MATCH_INFO.forEach(mi => {
   const set = new Set();
   (mi.matches || []).forEach(m => set.add(m.keyword.toLowerCase()));
   nodeMatchKws[mi.node_id] = set;
+});
+/* Merge combo keywords into nodeMatchKws so detail panel highlights them */
+Object.entries(COMBO_KWS).forEach(([nid, kws]) => {
+  if(!nodeMatchKws[nid]) nodeMatchKws[nid] = new Set();
+  kws.forEach(k => nodeMatchKws[nid].add(k.toLowerCase()));
 });
 
 /* ── Count ─────────────────────────────────────────────────────────────────── */
@@ -606,29 +726,41 @@ function sec(title, content, open=false){
 }
 /* ── Header value parser ─────────────────────────────────────────────────── */
 function _parseHeaderValue(name, value){
-  /* Returns {type:'simple'|'url'|'params', url, params:[{k,v}], fragment}
-     type='url'    – value is a URL, possibly with query string
-     type='params' – value contains &-separated key=value pairs (no scheme)
-     type='simple' – plain value */
+  /* Returns {type:'simple'|'url'|'params', params:[{k,v}]}
+     type='url'    – absolute or relative URL with >=1 query param
+     type='params' – bare &-separated key=value pairs (no scheme)
+     type='simple' – plain value; falls through to _autoDecodeValue
+
+     Fixes: single-param URLs and malformed/long SAML redirect URLs that
+     trip up new URL() are now handled by a manual fallback splitter. */
   if(!value||value.length<8)return{type:'simple'};
   const v=value.trim();
 
-  // Full URL (Location, Referer, etc.)
   if(/^https?:\/\//i.test(v)||v.startsWith('/')){
     try{
-      // Construct a URL — use dummy base for relative URLs
       const base = v.startsWith('/') ? 'https://x' : undefined;
       const u = new URL(base ? base+v : v);
       const params=[...u.searchParams.entries()].map(([k,val])=>({k,v:val}));
-      if(params.length){
-        return{type:'url',origin:u.origin+(base?'':u.hostname),
-               path:u.pathname,fragment:u.hash,params};
-      }
+      if(params.length) return{type:'url', path:u.pathname, fragment:u.hash, params};
     }catch{}
+    // Manual fallback for over-long / malformed SAML redirect URLs
+    const qi=v.indexOf('?');
+    if(qi!==-1){
+      try{
+        const qs=v.slice(qi+1).split('#')[0];
+        const pairs=qs.split('&').map(p=>{
+          const ei=p.indexOf('='); if(ei===-1)return null;
+          const k=decodeURIComponent(p.slice(0,ei).replace(/\+/g,' '));
+          let pv=p.slice(ei+1);
+          try{pv=decodeURIComponent(pv.replace(/\+/g,' '));}catch{}
+          return{k,v:pv};
+        }).filter(Boolean);
+        if(pairs.length) return{type:'url', path:v.slice(0,qi), fragment:'', params:pairs};
+      }catch{}
+    }
     return{type:'simple'};
   }
 
-  // & separated key=value (no scheme) — e.g. SAMLRequest=...&RelayState=...
   if(v.includes('=')&&v.includes('&')&&!/[\s<>\[\]{}"\'`]/.test(v)){
     try{
       const pairs=[...new URLSearchParams(v)];
@@ -729,12 +861,15 @@ function cookieTable(cs, kws=new Set()){
   }).join('')}</table>`;
 }
 function kvTableH(obj, kws=new Set()){
-  return `<table class="kv">${Object.entries(obj).map(([k,v])=>{
-    const sv=Array.isArray(v)?v.join(', '):String(v);
-    const vEnc = sv.length>16 ? detectEncodings(sv) : [];
-    const badges = vEnc.map(id=>{const e=ENCODINGS.find(e=>e.id===id);return`<span class="enc-badge ${e.cls}">${e.badge}</span>`;}).join('');
-    return `<tr><td>${hesc(k,kws)}</td><td>${hesc(sv,kws)}${badges}</td></tr>`;
-  }).join('')}</table>`;
+  /* Query params: auto-decode each value (SAMLRequest, JWT, base64…) using
+     _bodyValueRow — same pipeline as request/response body params.
+     Keywords are highlighted in the DECODED text. */
+  return `<table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px">${
+    Object.entries(obj).map(([k,v])=>{
+      const sv=Array.isArray(v)?v.join(', '):String(v);
+      return _bodyValueRow(k, sv, kws);
+    }).join('')
+  }</table>`;
 }
 /* ── Body value decode helper ─────────────────────────────────────────────── */
 function _autoDecodeValue(vStr){
@@ -1012,6 +1147,63 @@ function toggleMatchBody(){
   matchBodyCollapsed = !matchBodyCollapsed;
   document.getElementById('matchBody').classList.toggle('collapsed', matchBodyCollapsed);
   document.getElementById('matchChev').textContent = matchBodyCollapsed ? '▸' : '▾';
+}
+
+let comboBodyCollapsed = false;
+function toggleComboBody(){
+  comboBodyCollapsed = !comboBodyCollapsed;
+  document.getElementById('comboBody').classList.toggle('collapsed', comboBodyCollapsed);
+  document.getElementById('comboChev').textContent = comboBodyCollapsed ? '▸' : '▾';
+}
+
+function renderComboPanel(){
+  /* Build the combo panel — one mkw-style button per (keyword × node occurrence).
+     Groups by combo_name with a separator label.  Missing keywords shown greyed.
+     Clicking a found button calls jumpToNode with all keywords for that node
+     already in nodeMatchKws → full highlight in detail panel. */
+  if(!COMBO_INFO || COMBO_INFO.length === 0) return;
+
+  const panel = document.getElementById('comboPanel');
+  const body  = document.getElementById('comboBody');
+  const count = document.getElementById('comboCount');
+  panel.classList.remove('hidden');
+
+  const foundHits = COMBO_INFO.filter(e => e.found);
+  count.textContent = `· ${foundHits.length} hits`;
+
+  body.innerHTML = '';
+  let lastCombo = null;
+
+  COMBO_INFO.forEach(entry => {
+    /* Section separator when combo name changes */
+    if(entry.combo_name !== lastCombo){
+      lastCombo = entry.combo_name;
+      const sep = document.createElement('span');
+      sep.className = 'ckw-sep';
+      const statusIcon = entry.combo_status === 'found' ? '✅' :
+                         entry.combo_status === 'partial' ? '⚡' : '❌';
+      sep.textContent = `${statusIcon} ${entry.combo_name}`;
+      body.appendChild(sep);
+    }
+
+    const btn = document.createElement('button');
+    if(entry.found){
+      btn.className = 'ckw-btn';
+      btn.title = `${entry.keyword}\nField: ${entry.field}\nNode: ${entry.node_url}`;
+      btn.innerHTML =
+        `<span class="ckw-kw">${esc(entry.keyword)}</span>`+
+        `<span class="ckw-field">${esc(entry.field)}</span>`+
+        `<span class="ckw-path">${esc(entry.node_method)} ${esc(entry.node_path)}</span>`;
+      btn.addEventListener('click', () => jumpToNode(entry.node_id, btn));
+    } else {
+      btn.className = 'ckw-btn missing';
+      btn.title = `${entry.keyword} — not found\nField: ${entry.field}`;
+      btn.innerHTML =
+        `<span class="ckw-kw-miss">✗ ${esc(entry.keyword)}</span>`+
+        `<span class="ckw-field">${esc(entry.field)}</span>`;
+    }
+    body.appendChild(btn);
+  });
 }
 
 /* ── Search ────────────────────────────────────────────────────────────────── */
@@ -1469,6 +1661,7 @@ document.addEventListener('keydown',e=>{
 
 /* ── Init ──────────────────────────────────────────────────────────────────── */
 init();
+renderComboPanel();
 </script>
 </body>
 </html>"""
