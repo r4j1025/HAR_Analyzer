@@ -8,14 +8,15 @@ Parse browser `.har` files into an interactive request/response tree. Instantly 
 
 - **Tree builder** — converts flat HAR entries into a parent → child request tree using Referer headers, redirect chains, and path-prefix matching
 - **Noise filter** — automatically strips analytics, fonts, images, and CDN requests so only meaningful traffic is shown
-- **Auth filter** — detects OAuth 2.0, OIDC, SAML 2.0, AWS Cognito, session cookies, and 40+ other auth signals
-- **Custom filter** — keyword search across URL, headers, and request/response bodies with per-keyword weights and a weighted confidence score
-- **Combination matching** — multi-field rules to confirm end-to-end flows (e.g. full SAML POST binding, PKCE exchange); supports partial-match percentage scoring
-- **Protocol detection** — combined scoring from keyword weights and combination results gives a verdict (Confirmed / Likely / Possible / Not detected) with a transparent breakdown
-- **Smart decode at ingestion** — all request/response bodies and header values are pre-decoded at HAR upload time through a multi-layer pipeline (URL → JWT → Base64 → SAML Deflate → zlib inflate → JSON → HTML entities → Hex) so every keyword filter searches decoded content automatically
+- **Custom filter** — keyword search across URL, headers, and request/response bodies with per-keyword weights; two modes: Field Keywords (per-field match) and AND List (all keywords must appear somewhere along a branch path)
+- **Combination matching** — named multi-field rules that check whether a set of keywords appears anywhere across the tree (not restricted to a single node or branch); supports partial-match percentage scoring; if the same keyword appears in multiple nodes, each occurrence is listed as a separate clickable result
+- **Protocol Detection score** — blends keyword weights and combination results into a Confirmed / Likely / Possible / Not detected verdict with a transparent score breakdown; a fully matched combination always produces Confirmed (100) regardless of keyword weights
+- **Smart decode at ingestion** — all request/response bodies, header values, and URL query parameters are pre-decoded at HAR upload time through a multi-layer pipeline (URL-decode → JWT → Base64 → SAML Deflate → zlib inflate → JSON → HTML entities → Hex) so every keyword filter and combination search operates on decoded content automatically
+- **Query param decode in UI** — query string values in URLs and Location headers (e.g. `SAMLRequest`, JWT tokens, base64 blobs) are auto-decoded in the detail panel with method badges and "show original" toggles, matching the same behaviour as request body params
+- **Clickable combination keyword panel** — the 🔗 Combination Keywords panel inside the tree view shows one button per keyword occurrence per node; clicking any button opens that node and highlights all matched keywords in the detail panel
 - **Inline decoder** — select any text in the UI to decode JWT, Base64, SAML Deflate, URL-encoded, XML, or Hex values; chained decoding (e.g. URL → Base64 → XML Pretty Print) with full history and revert
 - **Smart body display** — JSON and form bodies rendered as key:value tables with decoded values shown inline; encoded values auto-decoded with method badge and "show original" toggle
-- **Smart header display** — `Location` and similar headers with URL query strings (e.g. `SAMLRequest=`, `RelayState=`) are parsed into a decoded param table automatically
+- **Smart header display** — Location and similar redirect headers with URL query strings (e.g. `SAMLRequest=`, `RelayState=`, `code=`) are parsed into a decoded parameter table automatically
 
 ---
 
@@ -102,13 +103,16 @@ Open **http://localhost:8501** in your browser.
 
 ## Quick usage
 
-1. Export one or more `.har` files from your browser (see steps above)
+1. Export one or more `.har` files from your browser DevTools (Network tab → right-click → Save all as HAR)
 2. Open the Streamlit UI, enter your site's root URL (e.g. `https://app.example.com`) in the sidebar, and upload the HAR file(s)
 3. Click **Analyze** — the request tree appears with noise already removed
-4. Click **Custom Filter** to search by keywords, or load a pre-built filter (`saml_filter.json`, `oauth2_filter.json`, `oidc_filter.json`) to detect specific protocols
-5. View the **Protocol Detection** verdict card for a confidence score with breakdown
-6. Click any node in the tree to expand its request and response — encoded values are automatically decoded inline
-7. Select any text in the detail panel to open the manual decoder with chaining support
+4. To detect auth protocols automatically, click **Auth Filter** — SAML, OAuth, OIDC, Cognito, and session flows are highlighted immediately
+5. Click **Custom Filter** to search by keywords, or load a pre-built filter (`saml_filter.json`, `oauth2_filter.json`, `oidc_filter.json`) to detect specific protocols
+6. Add **Combinations** in the Combination Search tab to check for multi-signal flows (e.g. `SAMLRequest` in URL + `StatusCode` in request body + `NameID` in request body); each combination produces a Found / Partial / Not found result
+7. View the **Protocol Detection** verdict card for a confidence score with breakdown — Confirmed / Likely / Possible / Not detected
+8. Click any node in the tree to expand its request and response — encoded values are automatically decoded inline
+9. In the **🔗 Combination Keywords** panel below the tree, click any keyword button to jump directly to the node where it was found, with all matched keywords highlighted
+10. Select any text in the detail panel to open the manual decoder with chaining support
 
 ---
 
